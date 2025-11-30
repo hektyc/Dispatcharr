@@ -13,16 +13,10 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from apps.channels.models import Channel
 from dispatcharr.utils import network_access_allowed
-from .manager import hls_manager
+from .manager import hls_manager, get_direct_stream_url
 from .config import hls_config
 
 logger = logging.getLogger(__name__)
-
-
-def get_ts_proxy_url(request, channel_uuid: str) -> str:
-    """Build the TS proxy URL for a channel."""
-    base_url = request.build_absolute_uri('/')[:-1]
-    return f"{base_url}/proxy/ts/stream/{channel_uuid}"
 
 
 @csrf_exempt
@@ -42,9 +36,18 @@ def hls_master_playlist(request, channel_uuid: str):
     except Channel.DoesNotExist:
         return HttpResponseNotFound("Channel not found")
 
-    # Get or start HLS session, passing channel for profile lookup
-    ts_url = get_ts_proxy_url(request, channel_uuid)
-    session = hls_manager.get_or_start_session(channel_uuid, ts_url, channel=channel)
+    # Get direct stream URL (bypasses TS proxy to avoid circular dependency)
+    stream_url, user_agent = get_direct_stream_url(channel)
+    if not stream_url:
+        return HttpResponse("No stream available for this channel", status=503)
+
+    # Get or start HLS session with direct stream URL
+    session = hls_manager.get_or_start_session(
+        channel_uuid,
+        stream_url,
+        user_agent=user_agent,
+        channel=channel
+    )
 
     if not session:
         return HttpResponse("Failed to start HLS output", status=500)

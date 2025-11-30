@@ -341,13 +341,60 @@ class Channel(models.Model):
 
     # @TODO: honor stream's stream profile
     def get_stream_profile(self):
+        """
+        Get the TS stream profile for this channel (for ts_proxy output).
+
+        This method ensures that only TS profiles (profile_type='ts') are returned
+        for use with the ts_proxy which outputs to pipe:1.
+
+        If the channel has a TS stream profile assigned, use it.
+        If the channel has an HLS profile or no profile, fall back to the default.
+        If the default is also an HLS profile, fall back to the 'ffmpeg' or 'Proxy' profile.
+
+        Returns:
+            StreamProfile: A TS stream profile suitable for ts_proxy output
+        """
+        from core.models import PROFILE_TYPE_TS, PROXY_PROFILE_NAME
+
         stream_profile = self.stream_profile
-        if not stream_profile:
-            stream_profile = StreamProfile.objects.get(
+
+        # If channel has a TS profile, use it
+        if stream_profile and stream_profile.is_ts_profile():
+            return stream_profile
+
+        # Try the default profile
+        try:
+            default_profile = StreamProfile.objects.get(
                 id=CoreSettings.get_default_stream_profile_id()
             )
+            # Only use if it's a TS profile
+            if default_profile.is_ts_profile():
+                return default_profile
+        except StreamProfile.DoesNotExist:
+            pass
 
-        return stream_profile
+        # Fall back to the default Proxy profile
+        try:
+            return StreamProfile.objects.get(
+                name=PROXY_PROFILE_NAME,
+                locked=True,
+                profile_type=PROFILE_TYPE_TS
+            )
+        except StreamProfile.DoesNotExist:
+            pass
+
+        # Last resort: find any active TS profile
+        ts_profile = StreamProfile.objects.filter(
+            profile_type=PROFILE_TYPE_TS,
+            is_active=True
+        ).first()
+        if ts_profile:
+            return ts_profile
+
+        # This shouldn't happen, but fall back to the original behavior as last resort
+        return StreamProfile.objects.get(
+            id=CoreSettings.get_default_stream_profile_id()
+        )
 
     def get_hls_stream_profile(self):
         """

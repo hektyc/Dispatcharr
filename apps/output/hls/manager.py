@@ -8,18 +8,68 @@ import threading
 import shutil
 import shlex
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from .config import hls_config
 
 logger = logging.getLogger(__name__)
 
 
+def get_direct_stream_url(channel) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Get the direct stream URL and user agent for a channel.
+
+    This bypasses the TS proxy and gets the actual source URL directly,
+    avoiding circular dependencies when HLS output consumes from TS proxy.
+
+    Args:
+        channel: Channel model instance
+
+    Returns:
+        Tuple[stream_url, user_agent]: The direct stream URL and user agent, or (None, None) on error
+    """
+    try:
+        from apps.proxy.ts_proxy.url_utils import transform_url
+
+        # Get stream and profile for this channel
+        stream_id, profile_id, error_reason = channel.get_stream()
+
+        if not stream_id or not profile_id:
+            logger.error(f"No stream available for channel {channel.uuid}: {error_reason}")
+            return None, None
+
+        # Get the stream and M3U profile
+        from apps.channels.models import Stream
+        from apps.m3u.models import M3UAccountProfile
+
+        stream = Stream.objects.get(pk=stream_id)
+        m3u_profile = M3UAccountProfile.objects.get(pk=profile_id)
+
+        # Get user agent from M3U account
+        m3u_account = stream.m3u_account
+        user_agent = m3u_account.get_user_agent().user_agent
+
+        # Transform URL using M3U profile patterns
+        stream_url = transform_url(
+            stream.url,
+            m3u_profile.search_pattern,
+            m3u_profile.replace_pattern
+        )
+
+        logger.debug(f"Got direct stream URL for channel {channel.uuid}: {stream_url[:50]}...")
+        return stream_url, user_agent
+
+    except Exception as e:
+        logger.error(f"Error getting direct stream URL for channel {channel.uuid}: {e}")
+        return None, None
+
+
 class HLSChannelSession:
     """Manages HLS output for a single channel."""
 
-    def __init__(self, channel_uuid: str, ts_url: str, channel=None):
+    def __init__(self, channel_uuid: str, stream_url: str, user_agent: str = None, channel=None):
         self.channel_uuid = channel_uuid
-        self.ts_url = ts_url
+        self.stream_url = stream_url  # Direct stream URL (not TS proxy URL)
+        self.user_agent_override = user_agent  # User agent from M3U account
         self.channel = channel  # Store channel reference for profile lookup
         self.process: Optional[subprocess.Popen] = None
         self.output_path = hls_config.get_channel_path(channel_uuid)
@@ -53,10 +103,22 @@ class HLSChannelSession:
             return None
 
     def _get_user_agent(self):
-        """Get the user agent string for this session."""
+        """Get the user agent string for this session.
+
+        Priority:
+        1. User agent override (from M3U account via get_direct_stream_url)
+        2. User agent from the HLS stream profile
+        3. Default user agent
+        """
+        # First, use the override if provided (this comes from the M3U account)
+        if self.user_agent_override:
+            return self.user_agent_override
+
+        # Otherwise, try the profile's user agent
         profile = self._get_stream_profile()
         if profile and profile.user_agent:
             return profile.user_agent.user_agent
+
         # Default user agent
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
@@ -164,7 +226,7 @@ class HLSChannelSession:
         # Build command using profile
         try:
             cmd = profile.build_command(
-                stream_url=self.ts_url,
+                stream_url=self.stream_url,
                 user_agent=user_agent,
                 hls_output_path=self.output_path
             )
@@ -201,7 +263,7 @@ class HLSChannelSession:
             "-hide_banner",
             "-loglevel", "warning",
             "-user_agent", user_agent,
-            "-i", self.ts_url,
+            "-i", self.stream_url,
             "-c", "copy",  # Copy without re-encoding
             "-f", "hls",
             "-hls_time", str(segment_duration),
@@ -274,13 +336,20 @@ class HLSOutputManager:
         """Get the singleton instance."""
         return cls()
 
-    def get_or_start_session(self, channel_uuid: str, ts_url: str, channel=None) -> Optional[HLSChannelSession]:
+    def get_or_start_session(
+        self,
+        channel_uuid: str,
+        stream_url: str,
+        user_agent: str = None,
+        channel=None
+    ) -> Optional[HLSChannelSession]:
         """
         Get an existing HLS session or start a new one.
 
         Args:
             channel_uuid: The UUID of the channel
-            ts_url: The TS proxy URL to consume
+            stream_url: The direct stream URL (not TS proxy URL)
+            user_agent: Optional user agent from the M3U account
             channel: Optional Channel model instance for profile lookup
 
         Returns the session if successful, None otherwise.
@@ -294,8 +363,13 @@ class HLSOutputManager:
                 # Session exists but not running, clean it up
                 del self._sessions[channel_uuid]
 
-            # Create new session with channel reference for profile lookup
-            session = HLSChannelSession(channel_uuid, ts_url, channel=channel)
+            # Create new session with direct stream URL and channel reference
+            session = HLSChannelSession(
+                channel_uuid,
+                stream_url,
+                user_agent=user_agent,
+                channel=channel
+            )
             if session.start():
                 self._sessions[channel_uuid] = session
                 return session
