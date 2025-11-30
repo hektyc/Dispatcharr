@@ -18,12 +18,14 @@ from .models import (
     STREAM_HASH_KEY,
     NETWORK_ACCESS,
     PROXY_SETTINGS_KEY,
+    HLS_OUTPUT_SETTINGS_KEY,
 )
 from .serializers import (
     UserAgentSerializer,
     StreamProfileSerializer,
     CoreSettingsSerializer,
     ProxySettingsSerializer,
+    HLSOutputSettingsSerializer,
 )
 
 import socket
@@ -457,3 +459,50 @@ def get_system_events(request):
         return Response({
             'error': 'Failed to fetch system events'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class HLSOutputSettingsViewSet(viewsets.ViewSet):
+    """
+    API endpoint for HLS output settings stored as JSON in CoreSettings.
+    """
+    serializer_class = HLSOutputSettingsSerializer
+
+    def _get_or_create_settings(self):
+        """Get or create the HLS output settings CoreSettings entry"""
+        try:
+            settings_obj = CoreSettings.objects.get(key=HLS_OUTPUT_SETTINGS_KEY)
+            settings_data = json.loads(settings_obj.value)
+        except CoreSettings.DoesNotExist:
+            # Create default settings
+            settings_data = {
+                "output_path": "/data/hls",
+                "segment_duration": 6,
+                "playlist_size": 5,
+                "retention_seconds": 0,
+                "ll_hls_enabled": False,
+            }
+            settings_obj = CoreSettings.objects.create(
+                key=HLS_OUTPUT_SETTINGS_KEY,
+                name="HLS Output Settings",
+                value=json.dumps(settings_data)
+            )
+        return settings_obj, settings_data
+
+    def list(self, request):
+        """Get current HLS output settings"""
+        _, settings_data = self._get_or_create_settings()
+        serializer = HLSOutputSettingsSerializer(data=settings_data)
+        serializer.is_valid()
+        return Response(serializer.data)
+
+    def create(self, request):
+        """Update HLS output settings"""
+        serializer = HLSOutputSettingsSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        settings_obj, _ = self._get_or_create_settings()
+        settings_obj.value = json.dumps(serializer.validated_data)
+        settings_obj.save()
+
+        return Response(serializer.validated_data)

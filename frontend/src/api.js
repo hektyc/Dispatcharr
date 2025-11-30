@@ -1494,6 +1494,27 @@ export default class API {
     }
   }
 
+  static async getHLSSettings() {
+    try {
+      const response = await request(`${host}/api/core/hls-settings/`);
+      return response;
+    } catch (e) {
+      errorNotification('Failed to retrieve HLS settings', e);
+    }
+  }
+
+  static async updateHLSSettings(settings) {
+    try {
+      const response = await request(`${host}/api/core/hls-settings/`, {
+        method: 'POST',
+        body: settings,
+      });
+      return response;
+    } catch (e) {
+      errorNotification('Failed to update HLS settings', e);
+    }
+  }
+
   static async getChannelStats(uuid = null) {
     try {
       const response = await request(`${host}/proxy/ts/status`);

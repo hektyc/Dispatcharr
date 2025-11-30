@@ -163,6 +163,7 @@ DVR_COMSKIP_CUSTOM_PATH_KEY = slugify("DVR Comskip Custom Path")
 DVR_PRE_OFFSET_MINUTES_KEY = slugify("DVR Pre-Offset Minutes")
 DVR_POST_OFFSET_MINUTES_KEY = slugify("DVR Post-Offset Minutes")
 SYSTEM_TIME_ZONE_KEY = slugify("System Time Zone")
+HLS_OUTPUT_SETTINGS_KEY = slugify("HLS Output Settings")
 
 
 class CoreSettings(models.Model):
@@ -375,6 +376,37 @@ class CoreSettings(models.Model):
             return rules
         except Exception:
             return rules
+
+    @classmethod
+    def get_hls_output_settings(cls):
+        """Retrieve HLS output settings as dict (or return defaults if not found)."""
+        import json
+        try:
+            settings_json = cls.objects.get(key=HLS_OUTPUT_SETTINGS_KEY).value
+            return json.loads(settings_json)
+        except (cls.DoesNotExist, json.JSONDecodeError):
+            # Return defaults if not found or invalid JSON
+            return {
+                "output_path": "/data/hls",
+                "segment_duration": 6,
+                "playlist_size": 5,
+                "retention_seconds": 0,
+                "ll_hls_enabled": False,
+            }
+
+    @classmethod
+    def set_hls_output_settings(cls, settings_dict):
+        """Save HLS output settings."""
+        import json
+        value = json.dumps(settings_dict)
+        obj, created = cls.objects.get_or_create(
+            key=HLS_OUTPUT_SETTINGS_KEY,
+            defaults={"name": "HLS Output Settings", "value": value},
+        )
+        if not created:
+            obj.value = value
+            obj.save(update_fields=["value"])
+        return settings_dict
 
 
 class SystemEvent(models.Model):

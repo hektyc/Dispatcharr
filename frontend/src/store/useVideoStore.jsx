@@ -8,13 +8,15 @@ const useVideoStore = create((set) => ({
   isVisible: false,
   streamUrl: null,
   contentType: 'live', // 'live' for MPEG-TS streams, 'vod' for MP4/MKV files
+  streamFormat: 'ts', // 'ts' for MPEG-TS, 'hls' for HLS streams
   metadata: null, // Store additional metadata for VOD content
 
-  showVideo: (url, type = 'live', metadata = null) =>
+  showVideo: (url, type = 'live', metadata = null, format = 'ts') =>
     set({
       isVisible: true,
       streamUrl: url,
       contentType: type,
+      streamFormat: format,
       metadata: metadata,
     }),
 
@@ -23,6 +25,7 @@ const useVideoStore = create((set) => ({
       isVisible: false,
       streamUrl: null,
       contentType: 'live',
+      streamFormat: 'ts',
       metadata: null,
     }),
 }));

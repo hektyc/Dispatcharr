@@ -98,3 +98,32 @@ class ProxySettingsSerializer(serializers.Serializer):
         if value < 0 or value > 60:
             raise serializers.ValidationError("Channel init grace period must be between 0 and 60 seconds")
         return value
+
+
+class HLSOutputSettingsSerializer(serializers.Serializer):
+    """Serializer for HLS output settings stored as JSON in CoreSettings"""
+    output_path = serializers.CharField(max_length=500, required=False, default="/data/hls")
+    segment_duration = serializers.IntegerField(min_value=2, max_value=10, required=False, default=6)
+    playlist_size = serializers.IntegerField(min_value=3, max_value=10, required=False, default=5)
+    retention_seconds = serializers.IntegerField(min_value=0, max_value=3600, required=False, default=0)
+    ll_hls_enabled = serializers.BooleanField(required=False, default=False)
+
+    def validate_output_path(self, value):
+        if not value or not value.startswith('/'):
+            raise serializers.ValidationError("Output path must be an absolute path starting with /")
+        return value
+
+    def validate_segment_duration(self, value):
+        if value < 2 or value > 10:
+            raise serializers.ValidationError("Segment duration must be between 2 and 10 seconds")
+        return value
+
+    def validate_playlist_size(self, value):
+        if value < 3 or value > 10:
+            raise serializers.ValidationError("Playlist size must be between 3 and 10 segments")
+        return value
+
+    def validate_retention_seconds(self, value):
+        if value < 0 or value > 3600:
+            raise serializers.ValidationError("Retention must be between 0 and 3600 seconds (0 = immediate cleanup)")
+        return value

@@ -264,6 +264,10 @@ const ChannelsTable = ({}) => {
 
   // store/settings
   const env_mode = useSettingsStore((s) => s.environment.env_mode);
+  const streamFormat = useSettingsStore((s) => s.streamFormat);
+  const setStreamFormat = useSettingsStore((s) => s.setStreamFormat);
+  const storedM3uParams = useSettingsStore((s) => s.m3uParams);
+  const setStoredM3uParams = useSettingsStore((s) => s.setM3uParams);
   const showVideo = useVideoStore((s) => s.showVideo);
   const [tableSize, _] = useLocalStorage('table-size', 'default');
 
@@ -314,17 +318,18 @@ const ChannelsTable = ({}) => {
     {}
   );
 
-  // M3U and EPG URL configuration state
-  const [m3uParams, setM3uParams] = useState({
-    cachedlogos: true,
-    direct: false,
-    tvg_id_source: 'channel_number',
-  });
+  // M3U and EPG URL configuration state - use stored values from settings store
+  const [m3uParams, setM3uParams] = useState(storedM3uParams);
   const [epgParams, setEpgParams] = useState({
     cachedlogos: true,
     tvg_id_source: 'channel_number',
     days: 0,
   });
+
+  // Sync m3uParams changes to the settings store
+  useEffect(() => {
+    setStoredM3uParams(m3uParams);
+  }, [m3uParams, setStoredM3uParams]);
 
   /**
    * Derived variables
@@ -536,7 +541,14 @@ const ChannelsTable = ({}) => {
       return '';
     }
 
-    const uri = `/proxy/ts/stream/${channel.uuid}`;
+    // Determine URL based on stream format (ts or hls)
+    let uri;
+    if (streamFormat === 'hls') {
+      uri = `/output/hls/${channel.uuid}/playlist.m3u8`;
+    } else {
+      uri = `/proxy/ts/stream/${channel.uuid}`;
+    }
+
     let channelUrl = `${window.location.protocol}//${window.location.host}${uri}`;
     if (env_mode == 'dev') {
       channelUrl = `${window.location.protocol}//${window.location.hostname}:5656${uri}`;
@@ -551,8 +563,9 @@ const ChannelsTable = ({}) => {
       `Watching stream for channel: ${channel.name} (${channel.id}), UUID: ${channel.uuid}`
     );
     const url = getChannelURL(channel);
-    console.log(`Stream URL: ${url}`);
-    showVideo(url);
+    console.log(`Stream URL: ${url}, Format: ${streamFormat}`);
+    // Pass format hint to video player
+    showVideo(url, 'live', null, streamFormat);
   };
 
   const onRowSelectionChange = (newSelection) => {
@@ -606,6 +619,8 @@ const ChannelsTable = ({}) => {
     if (m3uParams.direct) params.append('direct', 'true');
     if (m3uParams.tvg_id_source !== 'channel_number')
       params.append('tvg_id_source', m3uParams.tvg_id_source);
+    // Add format parameter if HLS is selected
+    if (streamFormat === 'hls') params.append('format', 'hls');
 
     const baseUrl = m3uUrl;
     return params.toString() ? `${baseUrl}?${params.toString()}` : baseUrl;
@@ -1207,6 +1222,17 @@ const ChannelsTable = ({}) => {
                         { value: 'channel_number', label: 'Channel Number' },
                         { value: 'tvg_id', label: 'TVG-ID' },
                         { value: 'gracenote', label: 'Gracenote Station ID' },
+                      ]}
+                    />
+                    <Select
+                      label="Output Format"
+                      size="xs"
+                      value={streamFormat}
+                      onChange={(value) => setStreamFormat(value)}
+                      comboboxProps={{ withinPortal: false }}
+                      data={[
+                        { value: 'ts', label: 'MPEG-TS' },
+                        { value: 'hls', label: 'HLS' },
                       ]}
                     />
                   </Stack>

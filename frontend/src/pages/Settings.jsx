@@ -197,6 +197,17 @@ const SettingsPage = () => {
   const [rehashSuccess, setRehashSuccess] = useState(false);
   const [rehashConfirmOpen, setRehashConfirmOpen] = useState(false);
 
+  // HLS Output Settings state
+  const [hlsSettings, setHlsSettings] = useState({
+    output_path: '/data/hls',
+    segment_duration: 6,
+    playlist_size: 5,
+    retention_seconds: 0,
+    ll_hls_enabled: false,
+  });
+  const [hlsSettingsSaved, setHlsSettingsSaved] = useState(false);
+  const [hlsSettingsLoading, setHlsSettingsLoading] = useState(false);
+
   // Add a new state to track the dialog type
   const [rehashDialogType, setRehashDialogType] = useState(null); // 'save' or 'rehash'
 
@@ -411,7 +422,46 @@ const SettingsPage = () => {
     setProxySettingsSaved(false);
     setNetworkAccessSaved(false);
     setRehashSuccess(false);
+    setHlsSettingsSaved(false);
   }, [accordianValue]);
+
+  // Load HLS settings on mount
+  useEffect(() => {
+    const loadHlsSettings = async () => {
+      try {
+        const response = await API.getHLSSettings();
+        if (response) {
+          setHlsSettings(response);
+        }
+      } catch (error) {
+        console.error('Failed to load HLS settings', error);
+      }
+    };
+    loadHlsSettings();
+  }, []);
+
+  // Save HLS settings handler
+  const saveHlsSettings = async () => {
+    setHlsSettingsLoading(true);
+    setHlsSettingsSaved(false);
+    try {
+      await API.updateHLSSettings(hlsSettings);
+      setHlsSettingsSaved(true);
+      notifications.show({
+        title: 'HLS Settings Saved',
+        message: 'HLS output settings have been updated successfully.',
+        color: 'green',
+      });
+    } catch (error) {
+      notifications.show({
+        title: 'Error',
+        message: 'Failed to save HLS settings.',
+        color: 'red',
+      });
+    } finally {
+      setHlsSettingsLoading(false);
+    }
+  };
 
   const onSubmit = async () => {
     setGeneralSettingsSaved(false);
@@ -1091,6 +1141,96 @@ const SettingsPage = () => {
                       </Button>
                     </Flex>
                   </form>
+                </Accordion.Panel>
+              </Accordion.Item>
+
+              <Accordion.Item value="hls-settings">
+                <Accordion.Control>HLS Output</Accordion.Control>
+                <Accordion.Panel>
+                  <Stack gap="md">
+                    {hlsSettingsSaved && (
+                      <Alert
+                        variant="light"
+                        color="green"
+                        title="Saved Successfully"
+                      />
+                    )}
+                    <Text size="sm" c="dimmed">
+                      Configure HLS (HTTP Live Streaming) output settings. HLS
+                      output can be enabled per M3U playlist using the format
+                      toggle in the M3U popover on the Channels page.
+                    </Text>
+                    <TextInput
+                      label="Output Path"
+                      description="Directory where HLS segments will be stored. Use /dev/shm for RAM disk."
+                      value={hlsSettings.output_path}
+                      onChange={(e) =>
+                        setHlsSettings((prev) => ({
+                          ...prev,
+                          output_path: e.target.value,
+                        }))
+                      }
+                    />
+                    <NumberInput
+                      label="Segment Duration"
+                      description="Duration of each HLS segment in seconds (2-10)"
+                      value={hlsSettings.segment_duration}
+                      onChange={(value) =>
+                        setHlsSettings((prev) => ({
+                          ...prev,
+                          segment_duration: value,
+                        }))
+                      }
+                      min={2}
+                      max={10}
+                    />
+                    <NumberInput
+                      label="Playlist Size"
+                      description="Number of segments to keep in the playlist (3-10)"
+                      value={hlsSettings.playlist_size}
+                      onChange={(value) =>
+                        setHlsSettings((prev) => ({
+                          ...prev,
+                          playlist_size: value,
+                        }))
+                      }
+                      min={3}
+                      max={10}
+                    />
+                    <NumberInput
+                      label="Retention (seconds)"
+                      description="How long to keep segments after removal from playlist. 0 = immediate cleanup."
+                      value={hlsSettings.retention_seconds}
+                      onChange={(value) =>
+                        setHlsSettings((prev) => ({
+                          ...prev,
+                          retention_seconds: value,
+                        }))
+                      }
+                      min={0}
+                      max={3600}
+                    />
+                    <Switch
+                      label="Enable Low-Latency HLS (LL-HLS)"
+                      description="Experimental: Reduces latency but may increase CPU usage"
+                      checked={hlsSettings.ll_hls_enabled}
+                      onChange={(e) =>
+                        setHlsSettings((prev) => ({
+                          ...prev,
+                          ll_hls_enabled: e.target.checked,
+                        }))
+                      }
+                    />
+                    <Flex mih={50} gap="xs" justify="flex-end" align="flex-end">
+                      <Button
+                        onClick={saveHlsSettings}
+                        loading={hlsSettingsLoading}
+                        variant="default"
+                      >
+                        Save
+                      </Button>
+                    </Flex>
+                  </Stack>
                 </Accordion.Panel>
               </Accordion.Item>
 

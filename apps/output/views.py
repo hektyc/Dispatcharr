@@ -180,6 +180,10 @@ def generate_m3u(request, profile_name=None, user=None):
     # Check if direct stream URLs should be used instead of proxy
     use_direct_urls = request.GET.get('direct', 'false').lower() == 'true'
 
+    # Get the output format: 'ts' (default MPEG-TS) or 'hls' (HLS output)
+    output_format = request.GET.get('format', 'ts').lower()
+    use_hls_output = output_format == 'hls'
+
     # Get the source to use for tvg-id value
     # Options: 'channel_number' (default), 'tvg_id', 'gracenote'
     tvg_id_source = request.GET.get('tvg_id_source', 'channel_number').lower()
@@ -249,7 +253,9 @@ def generate_m3u(request, profile_name=None, user=None):
             f'tvg-chno="{formatted_channel_number}" {tvc_guide_stationid}group-title="{group_title}",{channel.name}\n'
         )
 
-        # Determine the stream URL based on the direct parameter
+        # Determine the stream URL based on format and direct parameters
+        base_url = request.build_absolute_uri('/')[:-1]
+
         if use_direct_urls:
             # Try to get the first stream's direct URL
             first_stream = channel.streams.order_by('channelstream__order').first()
@@ -258,11 +264,15 @@ def generate_m3u(request, profile_name=None, user=None):
                 stream_url = first_stream.url
             else:
                 # Fall back to proxy URL if no direct URL available
-                base_url = request.build_absolute_uri('/')[:-1]
-                stream_url = f"{base_url}/proxy/ts/stream/{channel.uuid}"
+                if use_hls_output:
+                    stream_url = f"{base_url}/output/hls/{channel.uuid}/playlist.m3u8"
+                else:
+                    stream_url = f"{base_url}/proxy/ts/stream/{channel.uuid}"
+        elif use_hls_output:
+            # HLS output format
+            stream_url = f"{base_url}/output/hls/{channel.uuid}/playlist.m3u8"
         else:
-            # Standard behavior - use proxy URL
-            base_url = request.build_absolute_uri('/')[:-1]
+            # Standard behavior - use TS proxy URL
             stream_url = f"{base_url}/proxy/ts/stream/{channel.uuid}"
 
         m3u_content += extinf_line + stream_url + "\n"

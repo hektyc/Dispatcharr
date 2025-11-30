@@ -3,16 +3,19 @@ import React, { useEffect, useRef, useState } from 'react';
 import Draggable from 'react-draggable';
 import useVideoStore from '../store/useVideoStore';
 import mpegts from 'mpegts.js';
+import Hls from 'hls.js';
 import { CloseButton, Flex, Loader, Text, Box } from '@mantine/core';
 
 export default function FloatingVideo() {
   const isVisible = useVideoStore((s) => s.isVisible);
   const streamUrl = useVideoStore((s) => s.streamUrl);
   const contentType = useVideoStore((s) => s.contentType);
+  const streamFormat = useVideoStore((s) => s.streamFormat);
   const metadata = useVideoStore((s) => s.metadata);
   const hideVideo = useVideoStore((s) => s.hideVideo);
   const videoRef = useRef(null);
   const playerRef = useRef(null);
+  const hlsRef = useRef(null); // Separate ref for HLS.js instance
   const videoContainerRef = useRef(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
@@ -22,6 +25,17 @@ export default function FloatingVideo() {
   // Safely destroy the mpegts player to prevent errors
   const safeDestroyPlayer = () => {
     try {
+      // Destroy HLS.js instance if exists
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.destroy();
+        } catch (error) {
+          console.log('Error during HLS.js destruction:', error.message);
+        } finally {
+          hlsRef.current = null;
+        }
+      }
+
       if (playerRef.current) {
         setIsLoading(false);
         setLoadError(null);
@@ -53,6 +67,7 @@ export default function FloatingVideo() {
     } catch (error) {
       console.log('Error during player cleanup:', error);
       playerRef.current = null;
+      hlsRef.current = null;
     }
 
     // Clear overlay timer
@@ -281,6 +296,100 @@ export default function FloatingVideo() {
     }
   };
 
+  // Initialize HLS player (HLS.js)
+  const initializeHLSPlayer = () => {
+    if (!videoRef.current || !streamUrl) return;
+
+    setIsLoading(true);
+    setLoadError(null);
+
+    console.log('Initializing HLS player for:', streamUrl);
+
+    const video = videoRef.current;
+
+    // Check if HLS.js is supported
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        backBufferLength: 30,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 10,
+        liveDurationInfinity: true,
+        // Retry settings
+        manifestLoadingMaxRetry: 3,
+        levelLoadingMaxRetry: 3,
+        fragLoadingMaxRetry: 3,
+      });
+
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        setIsLoading(false);
+        video.play().catch((e) => {
+          console.log('Auto-play prevented:', e);
+          setLoadError('Auto-play was prevented. Click play to start.');
+        });
+      });
+
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          setIsLoading(false);
+          let errorMessage = 'HLS playback error';
+
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              errorMessage = `Network error: ${data.details}`;
+              // Try to recover
+              hls.startLoad();
+              break;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              errorMessage = `Media error: ${data.details}`;
+              // Try to recover
+              hls.recoverMediaError();
+              break;
+            default:
+              errorMessage = `Fatal error: ${data.details}`;
+              hls.destroy();
+              break;
+          }
+
+          console.error('HLS Error:', data);
+          setLoadError(errorMessage);
+        }
+      });
+
+      hlsRef.current = hls;
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Native HLS support (Safari)
+      video.src = streamUrl;
+      video.addEventListener('loadedmetadata', () => {
+        setIsLoading(false);
+        video.play().catch((e) => {
+          console.log('Auto-play prevented:', e);
+          setLoadError('Auto-play was prevented. Click play to start.');
+        });
+      });
+      video.addEventListener('error', (e) => {
+        setIsLoading(false);
+        setLoadError(`Video error: ${e.target.error?.message || 'Unknown error'}`);
+      });
+    } else {
+      setIsLoading(false);
+      setLoadError('HLS playback is not supported in this browser.');
+    }
+  };
+
+  // Detect if URL is HLS based on extension or format hint
+  const isHLSUrl = (url, format) => {
+    if (format === 'hls') return true;
+    if (url?.includes('.m3u8')) return true;
+    return false;
+  };
+
   useEffect(() => {
     if (!isVisible || !streamUrl) {
       safeDestroyPlayer();
@@ -290,9 +399,11 @@ export default function FloatingVideo() {
     // Clean up any existing player
     safeDestroyPlayer();
 
-    // Initialize the appropriate player based on content type
+    // Initialize the appropriate player based on content type and format
     if (contentType === 'vod') {
       initializeVODPlayer();
+    } else if (isHLSUrl(streamUrl, streamFormat)) {
+      initializeHLSPlayer();
     } else {
       initializeLivePlayer();
     }
@@ -301,7 +412,7 @@ export default function FloatingVideo() {
     return () => {
       safeDestroyPlayer();
     };
-  }, [isVisible, streamUrl, contentType]);
+  }, [isVisible, streamUrl, contentType, streamFormat]);
 
   // Modified hideVideo handler to clean up player first
   const handleClose = (e) => {
