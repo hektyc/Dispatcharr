@@ -2,6 +2,7 @@
 import os
 import json
 import logging
+import stat
 from django.conf import settings as django_settings
 
 logger = logging.getLogger(__name__)
@@ -46,9 +47,29 @@ class HLSConfig:
         """Get HLS output path."""
         settings = self._load_settings()
         path = settings.get("output_path", self.DEFAULT_OUTPUT_PATH)
-        # Ensure directory exists
-        os.makedirs(path, exist_ok=True)
+        # Ensure directory exists with proper permissions
+        self._ensure_directory(path)
         return path
+
+    def _ensure_directory(self, path):
+        """Ensure directory exists with proper permissions for HLS output."""
+        try:
+            if not os.path.exists(path):
+                os.makedirs(path, mode=0o755, exist_ok=True)
+                logger.info(f"Created HLS output directory: {path}")
+            else:
+                # Verify we can write to the directory
+                test_file = os.path.join(path, ".hls_write_test")
+                try:
+                    with open(test_file, "w") as f:
+                        f.write("test")
+                    os.remove(test_file)
+                except (IOError, OSError) as e:
+                    logger.error(f"HLS output directory {path} is not writable: {e}")
+                    raise
+        except Exception as e:
+            logger.error(f"Failed to create/verify HLS output directory {path}: {e}")
+            raise
 
     @property
     def segment_duration(self):
@@ -77,8 +98,22 @@ class HLSConfig:
     def get_channel_path(self, channel_uuid):
         """Get the output path for a specific channel."""
         channel_path = os.path.join(self.output_path, str(channel_uuid))
-        os.makedirs(channel_path, exist_ok=True)
+        self._ensure_directory(channel_path)
         return channel_path
+
+    def initialize(self):
+        """Initialize HLS output directory on startup.
+
+        This should be called during Django app initialization to ensure
+        the HLS output directory exists before any streams are started.
+        """
+        try:
+            path = self.output_path  # This triggers directory creation
+            logger.info(f"HLS output directory initialized: {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize HLS output directory: {e}")
+            return False
 
     def to_dict(self):
         """Return all settings as a dictionary."""

@@ -10,6 +10,7 @@ DATA_DIRS=(
     "/data/epgs"
     "/data/plugins"
     "/data/models"
+    "/data/hls"
 )
 
 APP_DIRS=(
