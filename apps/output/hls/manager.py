@@ -231,6 +231,14 @@ class HLSChannelSession:
             # Schedule delayed cleanup
             threading.Timer(retention, self._cleanup_segments).start()
 
+    def _is_source_hls(self):
+        """Check if the source URL is an HLS stream (ends with .m3u8)."""
+        if not self.stream_url:
+            return False
+        # Check if URL ends with .m3u8 (case insensitive)
+        url_lower = self.stream_url.lower().split('?')[0]  # Remove query params
+        return url_lower.endswith('.m3u8')
+
     def _build_ffmpeg_command(self):
         """
         Build the FFmpeg command for HLS output using the Stream Profile system.
@@ -240,8 +248,12 @@ class HLSChannelSession:
         are used with placeholder substitution for {streamUrl}, {userAgent}, and
         {hlsOutputPath}.
 
+        For HLS Proxy profile:
+        - If source is already HLS (.m3u8): Use passthrough (TODO: implement HLS proxy)
+        - If source is MPEG-TS or other format: Use fallback remux command to convert to HLS
+
         Returns:
-            List of command arguments, or empty list if using HLS Proxy profile
+            List of command arguments for FFmpeg
         """
         profile = self._get_stream_profile()
 
@@ -250,12 +262,18 @@ class HLSChannelSession:
             logger.warning(f"No HLS profile found for {self.channel_uuid}, using fallback")
             return self._build_fallback_command()
 
-        # Check if this is an HLS Proxy profile (no FFmpeg needed)
+        # Check if this is an HLS Proxy profile
         if profile.is_hls_proxy():
-            logger.info(f"HLS Proxy profile detected for {self.channel_uuid} - passthrough mode")
-            # HLS Proxy means the source is already HLS, just serve it
-            # This would require different handling (proxying HLS directly)
-            return []
+            if self._is_source_hls():
+                # Source is already HLS - TODO: implement HLS passthrough proxy
+                # For now, we still need to use FFmpeg to re-segment it
+                logger.info(f"HLS Proxy: source is HLS for {self.channel_uuid}, using remux")
+            else:
+                # Source is MPEG-TS or other - we need FFmpeg to convert to HLS
+                logger.info(f"HLS Proxy: source is MPEG-TS for {self.channel_uuid}, using remux")
+
+            # For HLS Proxy, always use fallback remux command (copy codecs, no transcoding)
+            return self._build_fallback_command()
 
         # Get user agent
         user_agent = self._get_user_agent()
