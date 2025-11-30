@@ -349,6 +349,39 @@ class Channel(models.Model):
 
         return stream_profile
 
+    def get_hls_stream_profile(self):
+        """
+        Get the HLS stream profile for this channel.
+
+        If the channel has a stream_profile that is an HLS profile, use it.
+        Otherwise, fall back to the default 'HLS FFmpeg' profile.
+
+        Returns:
+            StreamProfile: The HLS stream profile to use for this channel
+        """
+        from core.models import HLS_FFMPEG_PROFILE_NAME, PROFILE_TYPE_HLS
+
+        # Check if channel has an HLS stream profile assigned
+        if self.stream_profile and self.stream_profile.is_hls_profile():
+            return self.stream_profile
+
+        # Fall back to default HLS FFmpeg profile
+        try:
+            return StreamProfile.objects.get(
+                name=HLS_FFMPEG_PROFILE_NAME,
+                locked=True,
+                profile_type=PROFILE_TYPE_HLS
+            )
+        except StreamProfile.DoesNotExist:
+            # If HLS FFmpeg doesn't exist, try any HLS profile
+            hls_profile = StreamProfile.objects.filter(
+                profile_type=PROFILE_TYPE_HLS,
+                is_active=True
+            ).first()
+            if hls_profile:
+                return hls_profile
+            raise ValueError("No HLS stream profile available. Please create an HLS profile.")
+
     def get_stream(self):
         """
         Finds an available stream for the requested channel and returns the selected stream and profile.

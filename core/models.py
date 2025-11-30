@@ -32,6 +32,16 @@ class UserAgent(models.Model):
 
 PROXY_PROFILE_NAME = "Proxy"
 REDIRECT_PROFILE_NAME = "Redirect"
+HLS_PROXY_PROFILE_NAME = "HLS Proxy"
+HLS_FFMPEG_PROFILE_NAME = "HLS FFmpeg"
+
+# Profile type choices
+PROFILE_TYPE_TS = "ts"
+PROFILE_TYPE_HLS = "hls"
+PROFILE_TYPE_CHOICES = [
+    (PROFILE_TYPE_TS, "MPEG-TS Output"),
+    (PROFILE_TYPE_HLS, "HLS Output"),
+]
 
 
 class StreamProfile(models.Model):
@@ -42,8 +52,14 @@ class StreamProfile(models.Model):
         blank=True,
     )
     parameters = models.TextField(
-        help_text="Command-line parameters. Use {userAgent} and {streamUrl} as placeholders.",
+        help_text="Command-line parameters. Use {userAgent}, {streamUrl}, and {hlsOutputPath} as placeholders.",
         blank=True,
+    )
+    profile_type = models.CharField(
+        max_length=10,
+        choices=PROFILE_TYPE_CHOICES,
+        default=PROFILE_TYPE_TS,
+        help_text="Output type: 'ts' for MPEG-TS (pipe:1), 'hls' for HLS file output",
     )
     locked = models.BooleanField(
         default=False, help_text="Protected - can't be deleted or modified"
@@ -121,14 +137,49 @@ class StreamProfile(models.Model):
             return True
         return False
 
-    def build_command(self, stream_url, user_agent):
-        if self.is_proxy():
+    def is_hls_proxy(self):
+        """Check if this is the locked HLS Proxy profile."""
+        if self.locked and self.name == HLS_PROXY_PROFILE_NAME:
+            return True
+        return False
+
+    def is_hls_ffmpeg(self):
+        """Check if this is the locked HLS FFmpeg profile."""
+        if self.locked and self.name == HLS_FFMPEG_PROFILE_NAME:
+            return True
+        return False
+
+    def is_hls_profile(self):
+        """Check if this profile outputs HLS format."""
+        return self.profile_type == PROFILE_TYPE_HLS
+
+    def is_ts_profile(self):
+        """Check if this profile outputs MPEG-TS format."""
+        return self.profile_type == PROFILE_TYPE_TS
+
+    def build_command(self, stream_url, user_agent, hls_output_path=None):
+        """
+        Build the command for this stream profile.
+
+        Args:
+            stream_url: The stream URL to process
+            user_agent: The user agent string
+            hls_output_path: Path to HLS output directory (required for HLS profiles)
+
+        Returns:
+            List of command arguments, or empty list for proxy profiles
+        """
+        if self.is_proxy() or self.is_hls_proxy():
             return []
 
         replacements = {
             "{streamUrl}": stream_url,
             "{userAgent}": user_agent,
         }
+
+        # Add HLS output path if provided (for HLS profiles)
+        if hls_output_path:
+            replacements["{hlsOutputPath}"] = hls_output_path
 
         # Split the command and iterate through each part to apply replacements
         cmd = [self.command] + [

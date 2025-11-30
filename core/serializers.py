@@ -28,6 +28,7 @@ class StreamProfileSerializer(serializers.ModelSerializer):
             "name",
             "command",
             "parameters",
+            "profile_type",
             "is_active",
             "user_agent",
             "locked",

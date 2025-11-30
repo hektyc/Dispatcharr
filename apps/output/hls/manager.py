@@ -6,6 +6,7 @@ import time
 import subprocess
 import threading
 import shutil
+import shlex
 import logging
 from typing import Dict, Optional
 from .config import hls_config
@@ -16,14 +17,48 @@ logger = logging.getLogger(__name__)
 class HLSChannelSession:
     """Manages HLS output for a single channel."""
 
-    def __init__(self, channel_uuid: str, ts_url: str):
+    def __init__(self, channel_uuid: str, ts_url: str, channel=None):
         self.channel_uuid = channel_uuid
         self.ts_url = ts_url
+        self.channel = channel  # Store channel reference for profile lookup
         self.process: Optional[subprocess.Popen] = None
         self.output_path = hls_config.get_channel_path(channel_uuid)
         self.is_running = False
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
+        self._stream_profile = None  # Cache the stream profile
+
+    def _get_stream_profile(self):
+        """Get the HLS stream profile for this channel."""
+        if self._stream_profile:
+            return self._stream_profile
+
+        if self.channel:
+            try:
+                self._stream_profile = self.channel.get_hls_stream_profile()
+                return self._stream_profile
+            except Exception as e:
+                logger.warning(f"Could not get HLS profile for channel {self.channel_uuid}: {e}")
+
+        # Fall back to default HLS FFmpeg profile
+        from core.models import StreamProfile, HLS_FFMPEG_PROFILE_NAME, PROFILE_TYPE_HLS
+        try:
+            self._stream_profile = StreamProfile.objects.get(
+                name=HLS_FFMPEG_PROFILE_NAME,
+                locked=True
+            )
+            return self._stream_profile
+        except StreamProfile.DoesNotExist:
+            logger.error("Default HLS FFmpeg profile not found!")
+            return None
+
+    def _get_user_agent(self):
+        """Get the user agent string for this session."""
+        profile = self._get_stream_profile()
+        if profile and profile.user_agent:
+            return profile.user_agent.user_agent
+        # Default user agent
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
     def start(self):
         """Start the FFmpeg process for HLS output."""
@@ -36,6 +71,10 @@ class HLSChannelSession:
 
         # Build FFmpeg command
         cmd = self._build_ffmpeg_command()
+        if not cmd:
+            logger.error(f"Failed to build FFmpeg command for {self.channel_uuid}")
+            return False
+
         logger.info(f"Starting HLS output for {self.channel_uuid}: {' '.join(cmd)}")
 
         try:
@@ -94,16 +133,74 @@ class HLSChannelSession:
             threading.Timer(retention, self._cleanup_segments).start()
 
     def _build_ffmpeg_command(self):
-        """Build the FFmpeg command for HLS output."""
+        """
+        Build the FFmpeg command for HLS output using the Stream Profile system.
+
+        Uses the channel's HLS stream profile if available, otherwise falls back
+        to the default HLS FFmpeg profile. The profile's command and parameters
+        are used with placeholder substitution for {streamUrl}, {userAgent}, and
+        {hlsOutputPath}.
+
+        Returns:
+            List of command arguments, or empty list if using HLS Proxy profile
+        """
+        profile = self._get_stream_profile()
+
+        if not profile:
+            # No profile found, use fallback hardcoded command
+            logger.warning(f"No HLS profile found for {self.channel_uuid}, using fallback")
+            return self._build_fallback_command()
+
+        # Check if this is an HLS Proxy profile (no FFmpeg needed)
+        if profile.is_hls_proxy():
+            logger.info(f"HLS Proxy profile detected for {self.channel_uuid} - passthrough mode")
+            # HLS Proxy means the source is already HLS, just serve it
+            # This would require different handling (proxying HLS directly)
+            return []
+
+        # Get user agent
+        user_agent = self._get_user_agent()
+
+        # Build command using profile
+        try:
+            cmd = profile.build_command(
+                stream_url=self.ts_url,
+                user_agent=user_agent,
+                hls_output_path=self.output_path
+            )
+
+            if cmd:
+                # Add hide_banner and loglevel for cleaner output
+                # Insert after 'ffmpeg' command but before other arguments
+                if cmd[0] == "ffmpeg":
+                    cmd.insert(1, "-hide_banner")
+                    cmd.insert(2, "-loglevel")
+                    cmd.insert(3, "warning")
+
+                logger.debug(f"Built HLS command from profile '{profile.name}': {cmd}")
+                return cmd
+            else:
+                # Empty command means proxy mode or error
+                logger.warning(f"Profile '{profile.name}' returned empty command")
+                return self._build_fallback_command()
+
+        except Exception as e:
+            logger.error(f"Error building command from profile '{profile.name}': {e}")
+            return self._build_fallback_command()
+
+    def _build_fallback_command(self):
+        """Build a fallback FFmpeg command when no profile is available."""
         segment_duration = hls_config.segment_duration
         playlist_size = hls_config.playlist_size
         playlist_path = os.path.join(self.output_path, "stream.m3u8")
         segment_pattern = os.path.join(self.output_path, "segment_%05d.ts")
+        user_agent = self._get_user_agent()
 
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "warning",
+            "-user_agent", user_agent,
             "-i", self.ts_url,
             "-c", "copy",  # Copy without re-encoding
             "-f", "hls",
@@ -177,9 +274,15 @@ class HLSOutputManager:
         """Get the singleton instance."""
         return cls()
 
-    def get_or_start_session(self, channel_uuid: str, ts_url: str) -> Optional[HLSChannelSession]:
+    def get_or_start_session(self, channel_uuid: str, ts_url: str, channel=None) -> Optional[HLSChannelSession]:
         """
         Get an existing HLS session or start a new one.
+
+        Args:
+            channel_uuid: The UUID of the channel
+            ts_url: The TS proxy URL to consume
+            channel: Optional Channel model instance for profile lookup
+
         Returns the session if successful, None otherwise.
         """
         with self._sessions_lock:
@@ -191,8 +294,8 @@ class HLSOutputManager:
                 # Session exists but not running, clean it up
                 del self._sessions[channel_uuid]
 
-            # Create new session
-            session = HLSChannelSession(channel_uuid, ts_url)
+            # Create new session with channel reference for profile lookup
+            session = HLSChannelSession(channel_uuid, ts_url, channel=channel)
             if session.start():
                 self._sessions[channel_uuid] = session
                 return session

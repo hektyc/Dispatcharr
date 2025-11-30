@@ -4,7 +4,13 @@ import { useFormik } from 'formik';
 import * as Yup from 'yup';
 import API from '../../api';
 import useUserAgentsStore from '../../store/userAgents';
-import { Modal, TextInput, Select, Button, Flex } from '@mantine/core';
+import { Modal, TextInput, Select, Button, Flex, Text } from '@mantine/core';
+
+// Profile type options
+const PROFILE_TYPE_OPTIONS = [
+  { value: 'ts', label: 'MPEG-TS Output (pipe:1)' },
+  { value: 'hls', label: 'HLS Output (file-based)' },
+];
 
 const StreamProfile = ({ profile = null, isOpen, onClose }) => {
   const userAgents = useUserAgentsStore((state) => state.userAgents);
@@ -14,6 +20,7 @@ const StreamProfile = ({ profile = null, isOpen, onClose }) => {
       name: '',
       command: '',
       parameters: '',
+      profile_type: 'ts',
       is_active: true,
       user_agent: '',
     },
@@ -21,6 +28,7 @@ const StreamProfile = ({ profile = null, isOpen, onClose }) => {
       name: Yup.string().required('Name is required'),
       command: Yup.string().required('Command is required'),
       parameters: Yup.string().required('Parameters are is required'),
+      profile_type: Yup.string().oneOf(['ts', 'hls']).required('Profile type is required'),
     }),
     onSubmit: async (values, { setSubmitting, resetForm }) => {
       if (profile?.id) {
@@ -41,6 +49,7 @@ const StreamProfile = ({ profile = null, isOpen, onClose }) => {
         name: profile.name,
         command: profile.command,
         parameters: profile.parameters,
+        profile_type: profile.profile_type || 'ts',
         is_active: profile.is_active,
         user_agent: profile.user_agent,
       });
@@ -82,6 +91,23 @@ const StreamProfile = ({ profile = null, isOpen, onClose }) => {
           onChange={formik.handleChange}
           error={formik.errors.parameters}
           disabled={profile ? profile.locked : false}
+          description={
+            formik.values.profile_type === 'hls'
+              ? 'Use {streamUrl}, {userAgent}, and {hlsOutputPath} as placeholders'
+              : 'Use {streamUrl} and {userAgent} as placeholders'
+          }
+        />
+
+        <Select
+          id="profile_type"
+          name="profile_type"
+          label="Output Type"
+          value={formik.values.profile_type}
+          onChange={(value) => formik.setFieldValue('profile_type', value)}
+          error={formik.errors.profile_type}
+          disabled={profile ? profile.locked : false}
+          data={PROFILE_TYPE_OPTIONS}
+          description="MPEG-TS outputs to pipe:1, HLS outputs to segment files"
         />
 
         <Select
@@ -89,7 +115,7 @@ const StreamProfile = ({ profile = null, isOpen, onClose }) => {
           name="user_agent"
           label="User-Agent"
           value={formik.values.user_agent}
-          onChange={formik.handleChange}
+          onChange={(value) => formik.setFieldValue('user_agent', value)}
           error={formik.errors.user_agent}
           data={userAgents.map((ua) => ({
             label: ua.name,

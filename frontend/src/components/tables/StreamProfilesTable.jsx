@@ -27,6 +27,7 @@ import {
   EyeOff,
   SquarePlus,
 } from 'lucide-react';
+import { Badge } from '@mantine/core';
 import { CustomTable, useTable } from './CustomTable';
 import useLocalStorage from '../../hooks/useLocalStorage';
 
@@ -118,6 +119,23 @@ const StreamProfiles = () => {
             </div>
           </Tooltip>
         ),
+      },
+      {
+        header: 'Type',
+        accessorKey: 'profile_type',
+        size: 80,
+        cell: ({ cell }) => {
+          const type = cell.getValue() || 'ts';
+          return (
+            <Badge
+              size="sm"
+              color={type === 'hls' ? 'violet' : 'blue'}
+              variant="light"
+            >
+              {type === 'hls' ? 'HLS' : 'TS'}
+            </Badge>
+          );
+        },
       },
       {
         header: 'Active',
@@ -238,6 +256,7 @@ const StreamProfiles = () => {
       name: renderHeaderCell,
       command: renderHeaderCell,
       parameters: renderHeaderCell,
+      profile_type: renderHeaderCell,
       is_active: renderHeaderCell,
       actions: renderHeaderCell,
     },

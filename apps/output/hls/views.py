@@ -42,9 +42,9 @@ def hls_master_playlist(request, channel_uuid: str):
     except Channel.DoesNotExist:
         return HttpResponseNotFound("Channel not found")
 
-    # Get or start HLS session
+    # Get or start HLS session, passing channel for profile lookup
     ts_url = get_ts_proxy_url(request, channel_uuid)
-    session = hls_manager.get_or_start_session(channel_uuid, ts_url)
+    session = hls_manager.get_or_start_session(channel_uuid, ts_url, channel=channel)
 
     if not session:
         return HttpResponse("Failed to start HLS output", status=500)
