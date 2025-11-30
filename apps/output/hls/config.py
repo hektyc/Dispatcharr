@@ -9,7 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 class HLSConfig:
-    """Configuration for HLS output."""
+    """Configuration for HLS output.
+
+    Note: Settings are always read fresh from the database to support
+    multi-worker uwsgi environments where cache invalidation in one worker
+    doesn't affect other workers.
+    """
 
     # Default settings
     DEFAULT_OUTPUT_PATH = "/data/hls"
@@ -18,58 +23,80 @@ class HLSConfig:
     DEFAULT_RETENTION_SECONDS = 0  # 0 = delete immediately when channel stops
 
     def __init__(self):
-        self._settings = None
+        pass
 
     def _load_settings(self):
-        """Load HLS settings from CoreSettings."""
-        if self._settings is not None:
-            return self._settings
+        """Load HLS settings from CoreSettings.
 
+        Always reads fresh from database to support multi-worker environments.
+        """
         try:
             from core.models import CoreSettings, HLS_OUTPUT_SETTINGS_KEY
             settings_obj = CoreSettings.objects.filter(key=HLS_OUTPUT_SETTINGS_KEY).first()
             if settings_obj:
-                self._settings = json.loads(settings_obj.value)
+                return json.loads(settings_obj.value)
             else:
-                self._settings = {}
+                return {}
         except Exception as e:
             logger.warning(f"Could not load HLS settings: {e}")
-            self._settings = {}
-
-        return self._settings
+            return {}
 
     def _invalidate_cache(self):
-        """Invalidate cached settings."""
-        self._settings = None
+        """Invalidate cached settings.
+
+        This is kept for API compatibility but no longer does anything
+        since settings are always read fresh from the database.
+        """
+        pass
 
     @property
     def output_path(self):
-        """Get HLS output path."""
+        """Get HLS output path.
+
+        Returns the configured output path if it's writable, otherwise falls
+        back to the default path.
+        """
         settings = self._load_settings()
         path = settings.get("output_path", self.DEFAULT_OUTPUT_PATH)
-        # Ensure directory exists with proper permissions
-        self._ensure_directory(path)
+
+        # Try to ensure the configured path exists and is writable
+        if self._ensure_directory(path):
+            return path
+
+        # Fall back to default path if configured path fails
+        if path != self.DEFAULT_OUTPUT_PATH:
+            logger.warning(f"Configured HLS path {path} not usable, falling back to {self.DEFAULT_OUTPUT_PATH}")
+            if self._ensure_directory(self.DEFAULT_OUTPUT_PATH):
+                return self.DEFAULT_OUTPUT_PATH
+
+        # Last resort - just return the path and let it fail later
         return path
 
     def _ensure_directory(self, path):
-        """Ensure directory exists with proper permissions for HLS output."""
+        """Ensure directory exists with proper permissions for HLS output.
+
+        Returns True if directory exists and is writable, False otherwise.
+        Does not raise exceptions - logs errors instead.
+        """
         try:
             if not os.path.exists(path):
                 os.makedirs(path, mode=0o755, exist_ok=True)
                 logger.info(f"Created HLS output directory: {path}")
-            else:
-                # Verify we can write to the directory
-                test_file = os.path.join(path, ".hls_write_test")
-                try:
-                    with open(test_file, "w") as f:
-                        f.write("test")
-                    os.remove(test_file)
-                except (IOError, OSError) as e:
-                    logger.error(f"HLS output directory {path} is not writable: {e}")
-                    raise
+
+            # Verify we can write to the directory
+            test_file = os.path.join(path, ".hls_write_test")
+            try:
+                with open(test_file, "w") as f:
+                    f.write("test")
+                os.remove(test_file)
+                logger.debug(f"HLS output directory verified writable: {path}")
+                return True
+            except (IOError, OSError) as e:
+                logger.error(f"HLS output directory {path} is not writable: {e}")
+                return False
         except Exception as e:
             logger.error(f"Failed to create/verify HLS output directory {path}: {e}")
-            raise
+            return False
 
     @property
     def segment_duration(self):
