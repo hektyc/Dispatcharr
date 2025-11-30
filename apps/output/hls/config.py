@@ -7,13 +7,19 @@ from django.conf import settings as django_settings
 
 logger = logging.getLogger(__name__)
 
+# Environment variable for HLS output path
+HLS_OUTPUT_PATH_ENV = "HLS_OUTPUT_PATH"
+
 
 class HLSConfig:
     """Configuration for HLS output.
 
-    Note: Settings are always read fresh from the database to support
-    multi-worker uwsgi environments where cache invalidation in one worker
-    doesn't affect other workers.
+    Note: The output path is read from the HLS_OUTPUT_PATH environment variable
+    (set in docker-compose.yml or .env file). This ensures the path is configured
+    at container startup when volume mounts are defined.
+
+    Other settings are read fresh from the database to support multi-worker
+    uwsgi environments.
     """
 
     # Default settings
@@ -23,12 +29,14 @@ class HLSConfig:
     DEFAULT_RETENTION_SECONDS = 0  # 0 = delete immediately when channel stops
 
     def __init__(self):
-        pass
+        # Cache the output path from environment (doesn't change at runtime)
+        self._output_path = None
 
     def _load_settings(self):
         """Load HLS settings from CoreSettings.
 
         Always reads fresh from database to support multi-worker environments.
+        Note: output_path is NOT included here - it comes from environment variable.
         """
         try:
             from core.models import CoreSettings, HLS_OUTPUT_SETTINGS_KEY
@@ -46,31 +54,28 @@ class HLSConfig:
 
         This is kept for API compatibility but no longer does anything
         since settings are always read fresh from the database.
+        Note: output_path cache is NOT invalidated - it's from environment.
         """
         pass
 
     @property
     def output_path(self):
-        """Get HLS output path.
+        """Get HLS output path from environment variable.
 
-        Returns the configured output path if it's writable, otherwise falls
-        back to the default path.
+        The path is read from the HLS_OUTPUT_PATH environment variable.
+        If not set, defaults to /data/hls.
+
+        This is configured via docker-compose.yml or .env file, not via
+        the Settings UI, because Docker volume mounts must be defined at
+        container startup.
         """
-        settings = self._load_settings()
-        path = settings.get("output_path", self.DEFAULT_OUTPUT_PATH)
+        if self._output_path is None:
+            self._output_path = os.environ.get(HLS_OUTPUT_PATH_ENV, self.DEFAULT_OUTPUT_PATH)
+            logger.info(f"HLS output path configured from environment: {self._output_path}")
 
-        # Try to ensure the configured path exists and is writable
-        if self._ensure_directory(path):
-            return path
-
-        # Fall back to default path if configured path fails
-        if path != self.DEFAULT_OUTPUT_PATH:
-            logger.warning(f"Configured HLS path {path} not usable, falling back to {self.DEFAULT_OUTPUT_PATH}")
-            if self._ensure_directory(self.DEFAULT_OUTPUT_PATH):
-                return self.DEFAULT_OUTPUT_PATH
-
-        # Last resort - just return the path and let it fail later
-        return path
+        # Ensure directory exists and is writable
+        self._ensure_directory(self._output_path)
+        return self._output_path
 
     def _ensure_directory(self, path):
         """Ensure directory exists with proper permissions for HLS output.

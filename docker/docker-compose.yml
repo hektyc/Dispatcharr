@@ -17,6 +17,11 @@ services:
       - REDIS_HOST=redis
       - CELERY_BROKER_URL=redis://redis:6379/0
       - DISPATCHARR_LOG_LEVEL=info
+      # HLS Output Configuration
+      # Default: /data/hls (persisted to disk)
+      # Use /dev/shm for RAM disk (faster, but lost on restart)
+      # For custom paths, ensure the volume is mounted above
+      #- HLS_OUTPUT_PATH=/dev/shm
       # Process Priority Configuration (Optional)
       # Lower values = higher priority. Range: -20 (highest) to 19 (lowest)
       # Negative values require cap_add: SYS_NICE (uncomment below)

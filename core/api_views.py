@@ -464,6 +464,9 @@ def get_system_events(request):
 class HLSOutputSettingsViewSet(viewsets.ViewSet):
     """
     API endpoint for HLS output settings stored as JSON in CoreSettings.
+
+    Note: output_path is read-only and comes from the HLS_OUTPUT_PATH
+    environment variable (set in docker-compose.yml or .env file).
     """
     serializer_class = HLSOutputSettingsSerializer
 
@@ -473,9 +476,8 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
             settings_obj = CoreSettings.objects.get(key=HLS_OUTPUT_SETTINGS_KEY)
             settings_data = json.loads(settings_obj.value)
         except CoreSettings.DoesNotExist:
-            # Create default settings
+            # Create default settings (output_path not included - it's from env var)
             settings_data = {
-                "output_path": "/data/hls",
                 "segment_duration": 6,
                 "playlist_size": 5,
                 "retention_seconds": 0,
@@ -488,15 +490,32 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
             )
         return settings_obj, settings_data
 
+    def _get_output_path_from_env(self):
+        """Get the HLS output path from environment variable."""
+        import os
+        return os.environ.get("HLS_OUTPUT_PATH", "/data/hls")
+
     def list(self, request):
-        """Get current HLS output settings"""
+        """Get current HLS output settings.
+
+        Includes output_path from environment variable (read-only).
+        """
         _, settings_data = self._get_or_create_settings()
         serializer = HLSOutputSettingsSerializer(data=settings_data)
         serializer.is_valid()
-        return Response(serializer.data)
+
+        # Add output_path from environment (read-only, not part of serializer)
+        response_data = dict(serializer.data)
+        response_data["output_path"] = self._get_output_path_from_env()
+
+        return Response(response_data)
 
     def create(self, request):
-        """Update HLS output settings"""
+        """Update HLS output settings.
+
+        Note: output_path cannot be changed via this endpoint.
+        It must be set via HLS_OUTPUT_PATH environment variable.
+        """
         serializer = HLSOutputSettingsSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -512,4 +531,8 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
         except ImportError:
             pass  # HLS module not available
 
-        return Response(serializer.validated_data)
+        # Return the saved data plus output_path from environment
+        response_data = dict(serializer.validated_data)
+        response_data["output_path"] = self._get_output_path_from_env()
+
+        return Response(response_data)

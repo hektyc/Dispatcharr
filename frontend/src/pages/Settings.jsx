@@ -445,7 +445,9 @@ const SettingsPage = () => {
     setHlsSettingsLoading(true);
     setHlsSettingsSaved(false);
     try {
-      await API.updateHLSSettings(hlsSettings);
+      // Exclude output_path from save - it's read-only from environment variable
+      const { output_path, ...settingsToSave } = hlsSettings;
+      await API.updateHLSSettings(settingsToSave);
       setHlsSettingsSaved(true);
       notifications.show({
         title: 'HLS Settings Saved',
@@ -1162,14 +1164,16 @@ const SettingsPage = () => {
                     </Text>
                     <TextInput
                       label="Output Path"
-                      description="Directory where HLS segments will be stored. Use /dev/shm for RAM disk."
+                      description="Configured via HLS_OUTPUT_PATH environment variable in docker-compose.yml or .env file. Restart container after changing."
                       value={hlsSettings.output_path}
-                      onChange={(e) =>
-                        setHlsSettings((prev) => ({
-                          ...prev,
-                          output_path: e.target.value,
-                        }))
-                      }
+                      readOnly
+                      disabled
+                      styles={{
+                        input: {
+                          backgroundColor: 'var(--mantine-color-dark-6)',
+                          cursor: 'not-allowed',
+                        },
+                      }}
                     />
                     <NumberInput
                       label="Segment Duration"
