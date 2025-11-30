@@ -72,11 +72,32 @@ class HLSChannelSession:
         self.user_agent_override = user_agent  # User agent from M3U account
         self.channel = channel  # Store channel reference for profile lookup
         self.process: Optional[subprocess.Popen] = None
-        self.output_path = hls_config.get_channel_path(channel_uuid)
+        self._output_path = None  # Will be set on start() from current config
         self.is_running = False
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._stream_profile = None  # Cache the stream profile
+
+    @property
+    def output_path(self):
+        """Get the output path for this session.
+
+        Returns the cached path if set, otherwise gets fresh path from config.
+        The path is cached once start() is called to ensure consistency during
+        the session, but is refreshed if a new session starts.
+        """
+        if self._output_path is None:
+            self._output_path = hls_config.get_channel_path(self.channel_uuid)
+        return self._output_path
+
+    def _refresh_output_path(self):
+        """Refresh the output path from current config settings.
+
+        This should be called at the start of a new session to pick up
+        any changes to the HLS output path setting.
+        """
+        self._output_path = hls_config.get_channel_path(self.channel_uuid)
+        logger.debug(f"Refreshed HLS output path for {self.channel_uuid}: {self._output_path}")
 
     def _ensure_output_directory(self):
         """
@@ -160,6 +181,10 @@ class HLSChannelSession:
             logger.warning(f"HLS session for {self.channel_uuid} already running")
             return False
 
+        # Refresh output path from current config settings
+        # This ensures we pick up any changes to the HLS output path
+        self._refresh_output_path()
+
         # Ensure output directory exists before starting FFmpeg
         if not self._ensure_output_directory():
             logger.error(f"Failed to create output directory for {self.channel_uuid}")
@@ -224,12 +249,13 @@ class HLSChannelSession:
         self.is_running = False
 
         # Cleanup based on retention settings
+        # Use _cleanup_all() to remove both files AND directory
         retention = hls_config.retention_seconds
         if retention == 0:
-            self._cleanup_segments()
+            self._cleanup_all()
         else:
             # Schedule delayed cleanup
-            threading.Timer(retention, self._cleanup_segments).start()
+            threading.Timer(retention, self._cleanup_all).start()
 
     def _is_source_hls(self):
         """Check if the source URL is an HLS stream (ends with .m3u8)."""
@@ -343,6 +369,8 @@ class HLSChannelSession:
                     stderr = self.process.stderr.read().decode() if self.process.stderr else ""
                     logger.error(f"FFmpeg for {self.channel_uuid} exited unexpectedly: {stderr}")
                     self.is_running = False
+                    # Cleanup segments when process exits unexpectedly
+                    self._cleanup_all()
                 break
             time.sleep(1)
 
@@ -371,6 +399,19 @@ class HLSChannelSession:
                     logger.debug(f"No HLS files to clean up for {self.channel_uuid}")
         except Exception as e:
             logger.error(f"Failed to cleanup HLS segments for {self.channel_uuid}: {e}")
+
+    def _cleanup_all(self):
+        """Remove all HLS files AND the channel directory.
+
+        This is called when the session ends (either normally or unexpectedly)
+        to fully clean up all traces of the HLS output.
+        """
+        try:
+            if os.path.exists(self.output_path):
+                shutil.rmtree(self.output_path)
+                logger.info(f"Cleaned up HLS directory for {self.channel_uuid}: {self.output_path}")
+        except Exception as e:
+            logger.error(f"Failed to cleanup HLS directory for {self.channel_uuid}: {e}")
 
     @property
     def playlist_path(self):

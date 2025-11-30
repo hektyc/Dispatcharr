@@ -85,17 +85,25 @@ def hls_media_playlist(request, channel_uuid: str):
     """
     Serve the HLS media playlist (stream.m3u8) for a channel.
     URL: /output/hls/{channel_uuid}/stream.m3u8
+
+    Note: In a multi-worker uwsgi environment, sessions are not shared between
+    workers. Instead of checking session state, we check if the playlist file
+    exists on disk. This allows any worker to serve the playlist regardless of
+    which worker started the FFmpeg process.
     """
     if not network_access_allowed(request, "STREAMS"):
         return HttpResponse("Forbidden", status=403)
 
-    # Check if session is active
-    session = hls_manager.get_session(channel_uuid)
-    if not session or not session.is_running:
-        return HttpResponseNotFound("HLS session not active")
+    # Get the playlist path from config (don't rely on session state)
+    playlist_path = os.path.join(
+        hls_config.get_channel_path(channel_uuid),
+        "stream.m3u8"
+    )
 
-    playlist_path = session.playlist_path
+    # Check if playlist file exists on disk
     if not os.path.exists(playlist_path):
+        # Playlist doesn't exist - might need to start session
+        # Return 503 to tell client to retry
         return HttpResponse("Playlist not ready", status=503)
 
     # Read and modify playlist to use absolute URLs
