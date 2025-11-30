@@ -329,11 +329,28 @@ class HLSChannelSession:
             time.sleep(1)
 
     def _cleanup_segments(self):
-        """Remove all HLS segments and playlist for this channel."""
+        """Remove all HLS segments and playlist files for this channel.
+
+        Note: This only removes files inside the directory, not the directory itself.
+        The directory must remain for FFmpeg to write new segments.
+        """
         try:
             if os.path.exists(self.output_path):
-                shutil.rmtree(self.output_path)
-                logger.info(f"Cleaned up HLS segments for {self.channel_uuid}")
+                # Remove only the files inside, not the directory itself
+                files_removed = 0
+                for filename in os.listdir(self.output_path):
+                    file_path = os.path.join(self.output_path, filename)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                            files_removed += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to remove file {file_path}: {e}")
+
+                if files_removed > 0:
+                    logger.info(f"Cleaned up {files_removed} HLS files for {self.channel_uuid}")
+                else:
+                    logger.debug(f"No HLS files to clean up for {self.channel_uuid}")
         except Exception as e:
             logger.error(f"Failed to cleanup HLS segments for {self.channel_uuid}: {e}")
 

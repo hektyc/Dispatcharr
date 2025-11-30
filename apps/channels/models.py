@@ -400,17 +400,29 @@ class Channel(models.Model):
         """
         Get the HLS stream profile for this channel.
 
-        If the channel has a stream_profile that is an HLS profile, use it.
-        Otherwise, fall back to the default 'HLS FFmpeg' profile.
+        Priority:
+        1. If the channel has a stream_profile that is an HLS profile, use it.
+        2. If the global default stream profile is an HLS profile, use it.
+        3. Fall back to the default 'HLS FFmpeg' profile.
 
         Returns:
             StreamProfile: The HLS stream profile to use for this channel
         """
-        from core.models import HLS_FFMPEG_PROFILE_NAME, PROFILE_TYPE_HLS
+        from core.models import HLS_FFMPEG_PROFILE_NAME, PROFILE_TYPE_HLS, CoreSettings
 
         # Check if channel has an HLS stream profile assigned
         if self.stream_profile and self.stream_profile.is_hls_profile():
             return self.stream_profile
+
+        # Check if the global default stream profile is an HLS profile
+        try:
+            default_profile = StreamProfile.objects.get(
+                id=CoreSettings.get_default_stream_profile_id()
+            )
+            if default_profile.is_hls_profile():
+                return default_profile
+        except (StreamProfile.DoesNotExist, Exception):
+            pass
 
         # Fall back to default HLS FFmpeg profile
         try:

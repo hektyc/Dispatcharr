@@ -505,4 +505,11 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
         settings_obj.value = json.dumps(serializer.validated_data)
         settings_obj.save()
 
+        # Invalidate the HLS config cache so changes take effect immediately
+        try:
+            from apps.output.hls.config import hls_config
+            hls_config._invalidate_cache()
+        except ImportError:
+            pass  # HLS module not available
+
         return Response(serializer.validated_data)
