@@ -78,6 +78,38 @@ class HLSChannelSession:
         self._monitor_thread: Optional[threading.Thread] = None
         self._stream_profile = None  # Cache the stream profile
 
+    def _ensure_output_directory(self):
+        """
+        Ensure the HLS output directory exists and is writable.
+
+        This is called before starting FFmpeg to guarantee the directory
+        exists and has proper write permissions.
+
+        Returns:
+            bool: True if directory exists and is writable, False otherwise
+        """
+        try:
+            # Create directory if it doesn't exist
+            if not os.path.exists(self.output_path):
+                os.makedirs(self.output_path, mode=0o755, exist_ok=True)
+                logger.info(f"Created HLS output directory: {self.output_path}")
+
+            # Verify directory is writable by creating a test file
+            test_file = os.path.join(self.output_path, ".write_test")
+            try:
+                with open(test_file, "w") as f:
+                    f.write("test")
+                os.remove(test_file)
+                logger.debug(f"HLS output directory verified writable: {self.output_path}")
+                return True
+            except (IOError, OSError) as e:
+                logger.error(f"HLS output directory {self.output_path} is not writable: {e}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to ensure HLS output directory {self.output_path}: {e}")
+            return False
+
     def _get_stream_profile(self):
         """Get the HLS stream profile for this channel."""
         if self._stream_profile:
@@ -126,6 +158,11 @@ class HLSChannelSession:
         """Start the FFmpeg process for HLS output."""
         if self.is_running:
             logger.warning(f"HLS session for {self.channel_uuid} already running")
+            return False
+
+        # Ensure output directory exists before starting FFmpeg
+        if not self._ensure_output_directory():
+            logger.error(f"Failed to create output directory for {self.channel_uuid}")
             return False
 
         # Clean up any stale segments
@@ -262,8 +299,13 @@ class HLSChannelSession:
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "warning",
+            # Input options - must come before -i
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
             "-user_agent", user_agent,
             "-i", self.stream_url,
+            # Output options
             "-c", "copy",  # Copy without re-encoding
             "-f", "hls",
             "-hls_time", str(segment_duration),

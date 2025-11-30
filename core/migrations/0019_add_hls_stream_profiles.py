@@ -29,6 +29,10 @@ def create_hls_stream_profiles(apps, schema_editor):
 
     # HLS FFmpeg - Mirrors the ffmpeg profile but outputs HLS instead of pipe:1
     # Uses {hlsOutputPath} placeholder which will be replaced with the HLS segment output path
+    # Input parameters:
+    #   -reconnect 1: Enable reconnection on errors
+    #   -reconnect_streamed 1: Enable reconnection for streamed inputs
+    #   -reconnect_delay_max 5: Max delay between reconnection attempts
     # HLS-specific parameters:
     #   -f hls: Output format HLS
     #   -hls_time 4: 4-second segments
@@ -39,7 +43,7 @@ def create_hls_stream_profiles(apps, schema_editor):
         name="HLS FFmpeg",
         defaults={
             "command": "ffmpeg",
-            "parameters": "-user_agent {userAgent} -i {streamUrl} -c copy -f hls -hls_time 4 -hls_list_size 5 -hls_flags delete_segments+append_list -hls_segment_filename {hlsOutputPath}/segment_%05d.ts {hlsOutputPath}/stream.m3u8",
+            "parameters": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent {userAgent} -i {streamUrl} -c copy -f hls -hls_time 4 -hls_list_size 5 -hls_flags delete_segments+append_list -hls_segment_filename {hlsOutputPath}/segment_%05d.ts {hlsOutputPath}/stream.m3u8",
             "profile_type": "hls",
             "locked": True,
             "is_active": True,
