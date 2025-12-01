@@ -317,6 +317,9 @@ class HLSChannelSession:
         # Notify client manager that channel is inactive
         hls_client_manager.set_channel_inactive(self.channel_uuid)
 
+        # Release ownership so other workers know this channel is stopped
+        hls_manager._release_ownership(self.channel_uuid)
+
         # Cleanup based on retention settings
         # Use _cleanup_all() to remove both files AND directory
         retention = hls_config.retention_seconds
@@ -445,6 +448,10 @@ class HLSChannelSession:
         )
         stderr_thread.start()
 
+        # Track time for periodic ownership refresh
+        last_ownership_refresh = time.time()
+        OWNERSHIP_REFRESH_INTERVAL = 30  # seconds
+
         while not self._stop_event.is_set() and self.process:
             if self.process.poll() is not None:
                 # Process ended unexpectedly
@@ -453,7 +460,15 @@ class HLSChannelSession:
                     self.is_running = False
                     # Cleanup segments when process exits unexpectedly
                     self._cleanup_all()
+                    # Release ownership so another worker can take over if needed
+                    hls_manager._release_ownership(self.channel_uuid)
                 break
+
+            # Refresh ownership periodically to prevent TTL expiry
+            if time.time() - last_ownership_refresh > OWNERSHIP_REFRESH_INTERVAL:
+                hls_manager._refresh_ownership(self.channel_uuid)
+                last_ownership_refresh = time.time()
+
             time.sleep(1)
 
     def _read_ffmpeg_stderr(self):
@@ -781,10 +796,18 @@ class HLSOutputManager:
     """
     Singleton manager for all HLS output sessions.
     Handles starting/stopping HLS output for channels on demand.
+
+    Uses Redis-based coordination to prevent multiple uwsgi workers from
+    starting duplicate FFmpeg processes for the same channel.
     """
 
     _instance = None
     _lock = threading.Lock()
+
+    # Redis key prefixes for multi-worker coordination
+    OWNER_KEY_PREFIX = "hls_output:channel:"
+    OWNER_KEY_SUFFIX = ":owner"
+    OWNER_TTL = 60  # seconds - refreshed by owner
 
     def __new__(cls):
         if cls._instance is None:
@@ -800,7 +823,118 @@ class HLSOutputManager:
         self._sessions: Dict[str, HLSChannelSession] = {}
         self._sessions_lock = threading.Lock()
         self._initialized = True
-        logger.info("HLS Output Manager initialized")
+
+        # Generate unique worker ID for this process
+        import socket
+        import os
+        self._worker_id = f"{socket.gethostname()}:{os.getpid()}"
+
+        # Redis client for coordination
+        self._redis_client = None
+        self._init_redis()
+
+        logger.info(f"HLS Output Manager initialized (worker_id={self._worker_id})")
+
+    def _init_redis(self):
+        """Initialize Redis client for worker coordination."""
+        try:
+            from core.utils import RedisClient
+            self._redis_client = RedisClient.get_client()
+            logger.debug("HLS Manager: Redis client initialized")
+        except Exception as e:
+            logger.warning(f"HLS Manager: Failed to init Redis client: {e}")
+            self._redis_client = None
+
+    def _get_owner_key(self, channel_uuid: str) -> str:
+        """Get the Redis key for channel ownership."""
+        return f"{self.OWNER_KEY_PREFIX}{channel_uuid}{self.OWNER_KEY_SUFFIX}"
+
+    def _try_acquire_ownership(self, channel_uuid: str) -> bool:
+        """
+        Try to acquire ownership of a channel using Redis SETNX.
+
+        Returns True if we acquired ownership or already own it.
+        Returns False if another worker owns it.
+        """
+        if not self._redis_client:
+            # No Redis - allow local operation (single worker mode)
+            return True
+
+        try:
+            owner_key = self._get_owner_key(channel_uuid)
+
+            # Try atomic set-if-not-exists
+            acquired = self._redis_client.setnx(owner_key, self._worker_id)
+
+            if acquired:
+                # We got it - set TTL
+                self._redis_client.expire(owner_key, self.OWNER_TTL)
+                logger.info(f"HLS {channel_uuid}: Worker {self._worker_id} acquired ownership")
+                return True
+
+            # Check if we already own it
+            current_owner = self._redis_client.get(owner_key)
+            if current_owner:
+                current_owner = current_owner.decode('utf-8') if isinstance(current_owner, bytes) else current_owner
+                if current_owner == self._worker_id:
+                    # Refresh TTL
+                    self._redis_client.expire(owner_key, self.OWNER_TTL)
+                    return True
+                else:
+                    logger.debug(f"HLS {channel_uuid}: Owned by {current_owner}, not {self._worker_id}")
+                    return False
+
+            # Key expired between setnx and get - try again
+            return self._redis_client.setnx(owner_key, self._worker_id)
+
+        except Exception as e:
+            logger.warning(f"HLS {channel_uuid}: Redis error in ownership check: {e}")
+            return True  # Allow operation on Redis failure
+
+    def _release_ownership(self, channel_uuid: str):
+        """Release ownership of a channel if we own it."""
+        if not self._redis_client:
+            return
+
+        try:
+            owner_key = self._get_owner_key(channel_uuid)
+            current_owner = self._redis_client.get(owner_key)
+
+            if current_owner:
+                current_owner = current_owner.decode('utf-8') if isinstance(current_owner, bytes) else current_owner
+                if current_owner == self._worker_id:
+                    self._redis_client.delete(owner_key)
+                    logger.info(f"HLS {channel_uuid}: Released ownership")
+        except Exception as e:
+            logger.warning(f"HLS {channel_uuid}: Error releasing ownership: {e}")
+
+    def _refresh_ownership(self, channel_uuid: str):
+        """Refresh ownership TTL if we own the channel."""
+        if not self._redis_client:
+            return
+
+        try:
+            owner_key = self._get_owner_key(channel_uuid)
+            current_owner = self._redis_client.get(owner_key)
+
+            if current_owner:
+                current_owner = current_owner.decode('utf-8') if isinstance(current_owner, bytes) else current_owner
+                if current_owner == self._worker_id:
+                    self._redis_client.expire(owner_key, self.OWNER_TTL)
+        except Exception as e:
+            logger.debug(f"HLS {channel_uuid}: Error refreshing ownership: {e}")
+
+    def _is_session_active_in_redis(self, channel_uuid: str) -> bool:
+        """Check if any worker has an active session for this channel."""
+        if not self._redis_client:
+            return False
+
+        try:
+            owner_key = self._get_owner_key(channel_uuid)
+            return self._redis_client.exists(owner_key)
+        except Exception as e:
+            logger.debug(f"HLS {channel_uuid}: Error checking Redis session: {e}")
+            return False
 
     @classmethod
     def get_instance(cls) -> "HLSOutputManager":
@@ -817,6 +951,9 @@ class HLSOutputManager:
         """
         Get an existing HLS session or start a new one.
 
+        Uses Redis-based coordination to prevent multiple uwsgi workers
+        from starting duplicate FFmpeg processes for the same channel.
+
         Args:
             channel_uuid: The UUID of the channel
             stream_url: The direct stream URL (not TS proxy URL)
@@ -826,13 +963,63 @@ class HLSOutputManager:
         Returns the session if successful, None otherwise.
         """
         with self._sessions_lock:
-            # Check for existing session
+            # Check for existing local session first
             if channel_uuid in self._sessions:
                 session = self._sessions[channel_uuid]
                 if session.is_running:
+                    # Refresh our ownership TTL
+                    self._refresh_ownership(channel_uuid)
                     return session
                 # Session exists but not running, clean it up
+                self._release_ownership(channel_uuid)
                 del self._sessions[channel_uuid]
+
+            # Check if another worker already has an active session
+            if self._is_session_active_in_redis(channel_uuid):
+                # Another worker owns this channel
+                # Return a "virtual" session that just waits for the playlist
+                logger.info(f"HLS {channel_uuid}: Session owned by another worker, waiting for playlist")
+                # Create a placeholder session that doesn't start FFmpeg
+                # We just need to check if the playlist exists
+                placeholder = HLSChannelSession(
+                    channel_uuid,
+                    stream_url,
+                    user_agent=user_agent,
+                    channel=channel,
+                    stream_metadata={}
+                )
+                # Don't start FFmpeg - just check if playlist is ready
+                # The session's output_path will be set, so playlist_exists will work
+                if placeholder.playlist_exists:
+                    return placeholder
+                # Wait briefly for playlist to appear (other worker is creating it)
+                for _ in range(30):  # Wait up to 3 seconds
+                    time.sleep(0.1)
+                    if placeholder.playlist_exists:
+                        return placeholder
+                # Still no playlist - maybe the owner died, try to take over
+                logger.warning(f"HLS {channel_uuid}: Playlist not ready, attempting takeover")
+
+            # Try to acquire ownership
+            if not self._try_acquire_ownership(channel_uuid):
+                # Another worker just beat us - wait for their playlist
+                logger.info(f"HLS {channel_uuid}: Lost ownership race, waiting for playlist")
+                placeholder = HLSChannelSession(
+                    channel_uuid,
+                    stream_url,
+                    user_agent=user_agent,
+                    channel=channel,
+                    stream_metadata={}
+                )
+                for _ in range(50):  # Wait up to 5 seconds
+                    time.sleep(0.1)
+                    if placeholder.playlist_exists:
+                        return placeholder
+                logger.error(f"HLS {channel_uuid}: Failed to get playlist from owner")
+                return None
+
+            # We have ownership - start the session
+            logger.info(f"HLS {channel_uuid}: Starting session as owner ({self._worker_id})")
 
             # Get stream metadata for Active Connections display
             stream_metadata = {}
@@ -851,6 +1038,8 @@ class HLSOutputManager:
                 self._sessions[channel_uuid] = session
                 return session
 
+            # Failed to start - release ownership
+            self._release_ownership(channel_uuid)
             return None
 
     def stop_session(self, channel_uuid: str):
@@ -860,6 +1049,8 @@ class HLSOutputManager:
                 session = self._sessions[channel_uuid]
                 session.stop()
                 del self._sessions[channel_uuid]
+                # Release ownership when stopping
+                self._release_ownership(channel_uuid)
                 logger.info(f"HLS session stopped for {channel_uuid}")
 
     def get_session(self, channel_uuid: str) -> Optional[HLSChannelSession]:
