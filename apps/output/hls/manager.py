@@ -829,21 +829,33 @@ class HLSOutputManager:
         import os
         self._worker_id = f"{socket.gethostname()}:{os.getpid()}"
 
-        # Redis client for coordination
+        # Redis client for coordination - lazy initialization
         self._redis_client = None
-        self._init_redis()
+        self._redis_init_attempted = False
 
         logger.info(f"HLS Output Manager initialized (worker_id={self._worker_id})")
 
-    def _init_redis(self):
-        """Initialize Redis client for worker coordination."""
+    def _get_redis_client(self):
+        """Get Redis client with lazy initialization (non-blocking)."""
+        if self._redis_client is not None:
+            return self._redis_client
+
+        if self._redis_init_attempted:
+            # Already tried and failed, don't retry on every call
+            return None
+
+        self._redis_init_attempted = True
         try:
             from core.utils import RedisClient
+            # Use get_client with no retries to avoid blocking startup
             self._redis_client = RedisClient.get_client()
-            logger.debug("HLS Manager: Redis client initialized")
+            if self._redis_client:
+                logger.debug("HLS Manager: Redis client initialized")
+            return self._redis_client
         except Exception as e:
             logger.warning(f"HLS Manager: Failed to init Redis client: {e}")
             self._redis_client = None
+            return None
 
     def _get_owner_key(self, channel_uuid: str) -> str:
         """Get the Redis key for channel ownership."""
@@ -856,7 +868,8 @@ class HLSOutputManager:
         Returns True if we acquired ownership or already own it.
         Returns False if another worker owns it.
         """
-        if not self._redis_client:
+        redis_client = self._get_redis_client()
+        if not redis_client:
             # No Redis - allow local operation (single worker mode)
             return True
 
@@ -864,28 +877,28 @@ class HLSOutputManager:
             owner_key = self._get_owner_key(channel_uuid)
 
             # Try atomic set-if-not-exists
-            acquired = self._redis_client.setnx(owner_key, self._worker_id)
+            acquired = redis_client.setnx(owner_key, self._worker_id)
 
             if acquired:
                 # We got it - set TTL
-                self._redis_client.expire(owner_key, self.OWNER_TTL)
+                redis_client.expire(owner_key, self.OWNER_TTL)
                 logger.info(f"HLS {channel_uuid}: Worker {self._worker_id} acquired ownership")
                 return True
 
             # Check if we already own it
-            current_owner = self._redis_client.get(owner_key)
+            current_owner = redis_client.get(owner_key)
             if current_owner:
                 current_owner = current_owner.decode('utf-8') if isinstance(current_owner, bytes) else current_owner
                 if current_owner == self._worker_id:
                     # Refresh TTL
-                    self._redis_client.expire(owner_key, self.OWNER_TTL)
+                    redis_client.expire(owner_key, self.OWNER_TTL)
                     return True
                 else:
                     logger.debug(f"HLS {channel_uuid}: Owned by {current_owner}, not {self._worker_id}")
                     return False
 
             # Key expired between setnx and get - try again
-            return self._redis_client.setnx(owner_key, self._worker_id)
+            return redis_client.setnx(owner_key, self._worker_id)
 
         except Exception as e:
             logger.warning(f"HLS {channel_uuid}: Redis error in ownership check: {e}")
@@ -893,45 +906,48 @@ class HLSOutputManager:
 
     def _release_ownership(self, channel_uuid: str):
         """Release ownership of a channel if we own it."""
-        if not self._redis_client:
+        redis_client = self._get_redis_client()
+        if not redis_client:
             return
 
         try:
             owner_key = self._get_owner_key(channel_uuid)
-            current_owner = self._redis_client.get(owner_key)
+            current_owner = redis_client.get(owner_key)
 
             if current_owner:
                 current_owner = current_owner.decode('utf-8') if isinstance(current_owner, bytes) else current_owner
                 if current_owner == self._worker_id:
-                    self._redis_client.delete(owner_key)
+                    redis_client.delete(owner_key)
                     logger.info(f"HLS {channel_uuid}: Released ownership")
         except Exception as e:
             logger.warning(f"HLS {channel_uuid}: Error releasing ownership: {e}")
 
     def _refresh_ownership(self, channel_uuid: str):
         """Refresh ownership TTL if we own the channel."""
-        if not self._redis_client:
+        redis_client = self._get_redis_client()
+        if not redis_client:
             return
 
         try:
             owner_key = self._get_owner_key(channel_uuid)
-            current_owner = self._redis_client.get(owner_key)
+            current_owner = redis_client.get(owner_key)
 
             if current_owner:
                 current_owner = current_owner.decode('utf-8') if isinstance(current_owner, bytes) else current_owner
                 if current_owner == self._worker_id:
-                    self._redis_client.expire(owner_key, self.OWNER_TTL)
+                    redis_client.expire(owner_key, self.OWNER_TTL)
         except Exception as e:
             logger.debug(f"HLS {channel_uuid}: Error refreshing ownership: {e}")
 
     def _is_session_active_in_redis(self, channel_uuid: str) -> bool:
         """Check if any worker has an active session for this channel."""
-        if not self._redis_client:
+        redis_client = self._get_redis_client()
+        if not redis_client:
             return False
 
         try:
             owner_key = self._get_owner_key(channel_uuid)
-            return self._redis_client.exists(owner_key)
+            return redis_client.exists(owner_key)
         except Exception as e:
             logger.debug(f"HLS {channel_uuid}: Error checking Redis session: {e}")
             return False
