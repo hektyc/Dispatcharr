@@ -454,6 +454,7 @@ class HLSChannelSession:
 
     def _read_ffmpeg_stderr(self):
         """Read and parse FFmpeg stderr output for stream info and stats."""
+        logger.info(f"HLS {self.channel_uuid} stderr reader started")
         try:
             buffer = b""
             while self.process and self.process.stderr:
