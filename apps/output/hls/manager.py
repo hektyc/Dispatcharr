@@ -700,8 +700,11 @@ class HLSChannelSession:
                 # Use same key pattern as HLSClientManager for consistency
                 metadata_key = f"hls_output:channel:{self.channel_uuid}:metadata"
                 redis_client.hset(metadata_key, field, str(value))
+                logger.debug(f"HLS {self.channel_uuid} stored {field}={value} in Redis")
+            else:
+                logger.warning(f"HLS {self.channel_uuid} Redis client not available for {field}={value}")
         except Exception as e:
-            logger.debug(f"Error updating metadata field {field}: {e}")
+            logger.error(f"Error updating metadata field {field}: {e}")
 
     def _cleanup_segments(self):
         """Remove all HLS segments and playlist files for this channel.
