@@ -255,9 +255,12 @@ class HLSChannelSession:
         logger.info(f"Starting HLS output for {self.channel_uuid}: {' '.join(cmd)}")
 
         try:
+            # Note: HLS output writes to files, not stdout, so we use DEVNULL
+            # Using PIPE for stdout would cause buffer deadlock since FFmpeg
+            # might write some data to stdout that never gets read
             self.process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
             )
