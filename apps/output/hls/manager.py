@@ -695,7 +695,7 @@ class HLSChannelSession:
         the HLSClientManager's key pattern for consistent metadata storage.
         """
         try:
-            from core.redis_client import RedisClient
+            from core.utils import RedisClient
             redis_client = RedisClient.get_client()
             if redis_client:
                 # Use same key pattern as HLSClientManager for consistency
