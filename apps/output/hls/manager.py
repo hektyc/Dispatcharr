@@ -413,9 +413,19 @@ class HLSChannelSession:
         """
         segment_duration = hls_config.segment_duration
         playlist_size = hls_config.playlist_size
+        ll_hls_enabled = hls_config.ll_hls_enabled
+
+        logger.info(f"HLS {self.channel_uuid}: Building FFmpeg command with segment_duration={segment_duration}, playlist_size={playlist_size}, ll_hls={ll_hls_enabled}")
+
         playlist_path = os.path.join(self.output_path, "stream.m3u8")
         segment_pattern = os.path.join(self.output_path, "segment_%05d.ts")
         user_agent = self._get_user_agent()
+
+        # Build HLS flags
+        hls_flags = "delete_segments+append_list"
+        if ll_hls_enabled:
+            # LL-HLS requires additional flags for lower latency
+            hls_flags += "+independent_segments"
 
         cmd = [
             "ffmpeg",
@@ -430,10 +440,19 @@ class HLSChannelSession:
             "-f", "hls",
             "-hls_time", str(segment_duration),
             "-hls_list_size", str(playlist_size),
-            "-hls_flags", "delete_segments+append_list",
+            "-hls_flags", hls_flags,
             "-hls_segment_filename", segment_pattern,
-            playlist_path,
         ]
+
+        # Add LL-HLS specific options
+        if ll_hls_enabled:
+            # LL-HLS part files for lower latency
+            cmd.extend([
+                "-hls_fmp4_init_filename", "init.mp4",
+                "-hls_segment_type", "fmp4",
+            ])
+
+        cmd.append(playlist_path)
         return cmd
 
     def _monitor_process(self):

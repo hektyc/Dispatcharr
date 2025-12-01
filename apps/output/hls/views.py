@@ -2,6 +2,8 @@
 # Serves HLS playlists and segments to clients
 
 import os
+import glob
+import time
 import uuid
 import logging
 from django.http import (
@@ -75,15 +77,21 @@ def hls_master_playlist(request, channel_uuid: str):
     if not session:
         return HttpResponse("Failed to start HLS output", status=500)
 
-    # Wait briefly for playlist to be created (up to 5 seconds)
-    import time
-    for _ in range(50):
+    # Wait for playlist AND at least one segment to be created (up to 10 seconds)
+    # This prevents serving a playlist that references non-existent segments
+    playlist_ready = False
+    for _ in range(100):  # 10 seconds
         if session.playlist_exists:
-            break
+            # Also check that at least one segment exists
+            segment_pattern = os.path.join(session.output_path, "segment_*.ts")
+            segments = glob.glob(segment_pattern)
+            if segments:
+                playlist_ready = True
+                break
         time.sleep(0.1)
 
-    if not session.playlist_exists:
-        return HttpResponse("HLS playlist not ready yet, try again", status=503)
+    if not playlist_ready:
+        return HttpResponse("HLS stream not ready yet, try again", status=503)
 
     # Track client connection
     client_id = _get_client_id(request)
