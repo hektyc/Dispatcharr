@@ -91,6 +91,7 @@ if [[ ! -f /etc/profile.d/dispatcharr.sh ]]; then
         REDIS_HOST REDIS_DB POSTGRES_DIR DISPATCHARR_PORT
         DISPATCHARR_VERSION DISPATCHARR_TIMESTAMP LIBVA_DRIVERS_PATH LIBVA_DRIVER_NAME LD_LIBRARY_PATH
         CELERY_NICE_LEVEL UWSGI_NICE_LEVEL
+        HLS_OUTPUT_PATH
     )
 
     # Process each variable for both profile.d and environment

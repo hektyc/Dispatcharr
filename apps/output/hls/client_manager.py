@@ -28,8 +28,8 @@ class HLSClientManager:
     CHANNEL_KEY_PREFIX = "hls_output:channel:"
     CLIENT_TTL = 60  # Seconds before client is considered disconnected
     HEARTBEAT_INTERVAL = 10  # Seconds between heartbeat updates
-    CLEANUP_CHECK_INTERVAL = 5  # Seconds between cleanup checks
-    INACTIVITY_TIMEOUT = 30  # Seconds of no client activity before stopping session
+    CLEANUP_CHECK_INTERVAL = 1  # Seconds between cleanup checks (fast for quick response)
+    DEFAULT_INACTIVITY_TIMEOUT = 5  # Fallback if database setting unavailable
 
     _instance = None
     _lock = threading.Lock()
@@ -540,23 +540,26 @@ class HLSClientManager:
                                 active_clients += 1
                         client_count = active_clients
 
-                    if client_count == 0 and inactive_seconds > self.INACTIVITY_TIMEOUT:
+                    # Get shutdown delay from database (same setting as TS proxy)
+                    shutdown_delay = self._get_shutdown_delay()
+
+                    if client_count == 0 and inactive_seconds > shutdown_delay:
                         # No active clients and no recent activity - stop the session
                         logger.info(
                             f"HLS channel {channel_uuid} inactive for {inactive_seconds:.1f}s "
-                            f"with no clients - stopping session"
+                            f"with no clients (shutdown_delay={shutdown_delay}s) - stopping session"
                         )
 
                         # Stop the HLS session using PID from Redis
                         # This works across workers since PID is stored in Redis
                         self._stop_session_by_pid(channel_uuid, metadata_key)
 
-                    elif client_count == 0 and inactive_seconds > 5:
-                        # Log a warning that we're tracking inactivity
+                    elif client_count == 0 and inactive_seconds > 1:
+                        # Log a debug message that we're tracking inactivity
                         logger.debug(
                             f"HLS channel {channel_uuid} no clients, "
                             f"inactive for {inactive_seconds:.1f}s "
-                            f"(will stop after {self.INACTIVITY_TIMEOUT}s)"
+                            f"(will stop after {shutdown_delay}s)"
                         )
 
                 except Exception as e:
@@ -625,9 +628,23 @@ class HLSClientManager:
         except Exception as e:
             logger.error(f"Error stopping HLS session {channel_uuid}: {e}")
 
+    def _get_shutdown_delay(self) -> int:
+        """
+        Get the channel shutdown delay from the database.
+
+        Uses the same setting as TS proxy (Settings -> TS/HLS Output -> Channel Shutdown Delay).
+        Falls back to DEFAULT_INACTIVITY_TIMEOUT if database is unavailable.
+        """
+        try:
+            from apps.proxy.ts_proxy.config_helper import ConfigHelper
+            return ConfigHelper.channel_shutdown_delay()
+        except Exception as e:
+            logger.debug(f"Could not get shutdown delay from database: {e}")
+            return self.DEFAULT_INACTIVITY_TIMEOUT
+
     def get_inactivity_timeout(self) -> int:
         """Get the configured inactivity timeout in seconds."""
-        return self.INACTIVITY_TIMEOUT
+        return self._get_shutdown_delay()
 
 
 # Global instance
