@@ -16,21 +16,24 @@ logger = logging.getLogger(__name__)
 class HLSClientManager:
     """
     Manages HLS client connections with Redis backing for multi-worker support.
-    
+
     This mirrors the TS proxy's client tracking pattern:
     - Clients are tracked per channel in Redis
     - WebSocket updates are sent when clients connect/disconnect
     - Client activity is tracked with TTL for automatic cleanup
+    - Cleanup thread stops HLS sessions when all clients disconnect
     """
-    
+
     # Redis key patterns
     CHANNEL_KEY_PREFIX = "hls_output:channel:"
     CLIENT_TTL = 60  # Seconds before client is considered disconnected
     HEARTBEAT_INTERVAL = 10  # Seconds between heartbeat updates
-    
+    CLEANUP_CHECK_INTERVAL = 5  # Seconds between cleanup checks
+    INACTIVITY_TIMEOUT = 30  # Seconds of no client activity before stopping session
+
     _instance = None
     _lock = threading.Lock()
-    
+
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
@@ -38,16 +41,21 @@ class HLSClientManager:
                     cls._instance = super().__new__(cls)
                     cls._instance._initialized = False
         return cls._instance
-    
+
     def __init__(self):
         if self._initialized:
             return
-        
+
         self._redis_client = None
         self._local_clients: Dict[str, Set[str]] = {}  # channel_uuid -> set of client_ids
         self._client_lock = threading.Lock()
+        self._cleanup_thread: Optional[threading.Thread] = None
+        self._cleanup_running = False
         self._initialized = True
         logger.info("HLS Client Manager initialized")
+
+        # Start the cleanup thread
+        self._start_cleanup_thread()
     
     @property
     def redis_client(self):
@@ -407,6 +415,152 @@ class HLSClientManager:
 
         except Exception as e:
             logger.error(f"Error setting HLS channel inactive: {e}")
+
+    def _start_cleanup_thread(self):
+        """Start the background cleanup thread that stops inactive HLS sessions."""
+        if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
+            return
+
+        self._cleanup_running = True
+        self._cleanup_thread = threading.Thread(
+            target=self._cleanup_loop,
+            daemon=True,
+            name="hls-client-cleanup"
+        )
+        self._cleanup_thread.start()
+        logger.info("HLS client cleanup thread started")
+
+    def _stop_cleanup_thread(self):
+        """Stop the cleanup thread."""
+        self._cleanup_running = False
+        if self._cleanup_thread is not None:
+            self._cleanup_thread.join(timeout=5)
+            self._cleanup_thread = None
+
+    def _cleanup_loop(self):
+        """
+        Background loop that checks for inactive HLS channels and stops them.
+
+        This is the key mechanism that detects when clients have stopped watching
+        and stops the FFmpeg process to prevent runaway segment generation.
+        """
+        logger.info("HLS cleanup loop starting")
+
+        while self._cleanup_running:
+            try:
+                self._check_and_cleanup_inactive_channels()
+            except Exception as e:
+                logger.error(f"Error in HLS cleanup loop: {e}")
+
+            # Sleep in small increments so we can exit quickly
+            for _ in range(self.CLEANUP_CHECK_INTERVAL):
+                if not self._cleanup_running:
+                    break
+                time.sleep(1)
+
+        logger.info("HLS cleanup loop stopped")
+
+    def _check_and_cleanup_inactive_channels(self):
+        """
+        Check for channels with no recent client activity and stop them.
+
+        A channel is considered inactive if:
+        1. It has an active FFmpeg session (metadata exists in Redis)
+        2. No clients have made requests within INACTIVITY_TIMEOUT seconds
+
+        The client activity is tracked by the TTL on Redis keys - if the client
+        keys have expired, it means no recent requests were made.
+        """
+        if not self.redis_client:
+            return
+
+        try:
+            # Import here to avoid circular imports
+            from .manager import hls_manager
+
+            # Scan for all HLS channel metadata keys
+            channels_to_check = []
+            cursor = 0
+            while True:
+                cursor, keys = self.redis_client.scan(
+                    cursor,
+                    match=f"{self.CHANNEL_KEY_PREFIX}*:metadata",
+                    count=100
+                )
+
+                for key in keys:
+                    # Extract channel UUID from key
+                    # Key format: hls_output:channel:{uuid}:metadata
+                    parts = key.split(":")
+                    if len(parts) >= 4:
+                        channel_uuid = parts[2]
+                        channels_to_check.append(channel_uuid)
+
+                if cursor == 0:
+                    break
+
+            # Check each channel for activity
+            current_time = time.time()
+
+            for channel_uuid in channels_to_check:
+                try:
+                    # Get the channel's last activity time
+                    metadata_key = self._get_channel_metadata_key(channel_uuid)
+                    last_activity_str = self.redis_client.hget(metadata_key, "last_activity")
+
+                    if last_activity_str is None:
+                        # No metadata - channel may have been cleaned up
+                        continue
+
+                    last_activity = float(last_activity_str)
+                    inactive_seconds = current_time - last_activity
+
+                    # Check if there are any active clients
+                    clients_key = self._get_channel_clients_key(channel_uuid)
+                    client_count = self.redis_client.scard(clients_key) or 0
+
+                    # Also check if any individual client keys still exist (TTL-based)
+                    # This is a more accurate check since client keys expire with TTL
+                    if client_count > 0:
+                        # Verify clients are actually active (keys haven't expired)
+                        client_ids = list(self.redis_client.smembers(clients_key) or set())
+                        active_clients = 0
+                        for client_id in client_ids:
+                            client_key = self._get_client_key(channel_uuid, client_id)
+                            if self.redis_client.exists(client_key):
+                                active_clients += 1
+                        client_count = active_clients
+
+                    if client_count == 0 and inactive_seconds > self.INACTIVITY_TIMEOUT:
+                        # No active clients and no recent activity - stop the session
+                        logger.info(
+                            f"HLS channel {channel_uuid} inactive for {inactive_seconds:.1f}s "
+                            f"with no clients - stopping session"
+                        )
+
+                        # Stop the HLS session
+                        hls_manager.stop_session(channel_uuid)
+
+                        # Clean up Redis keys (session.stop() should do this but be sure)
+                        self.set_channel_inactive(channel_uuid)
+
+                    elif client_count == 0 and inactive_seconds > 5:
+                        # Log a warning that we're tracking inactivity
+                        logger.debug(
+                            f"HLS channel {channel_uuid} no clients, "
+                            f"inactive for {inactive_seconds:.1f}s "
+                            f"(will stop after {self.INACTIVITY_TIMEOUT}s)"
+                        )
+
+                except Exception as e:
+                    logger.error(f"Error checking HLS channel {channel_uuid}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in HLS cleanup check: {e}")
+
+    def get_inactivity_timeout(self) -> int:
+        """Get the configured inactivity timeout in seconds."""
+        return self.INACTIVITY_TIMEOUT
 
 
 # Global instance

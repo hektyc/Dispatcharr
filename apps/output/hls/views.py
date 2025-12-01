@@ -185,6 +185,11 @@ def hls_segment(request, channel_uuid: str, segment_name: str):
     if not os.path.exists(segment_path):
         return HttpResponseNotFound("Segment not found")
 
+    # Update client activity on segment requests
+    # This is important to keep the session alive while client is actively streaming
+    client_id = _get_client_id(request)
+    hls_client_manager.update_client_activity(channel_uuid, client_id)
+
     # Determine content type
     if segment_name.endswith(".ts"):
         content_type = "video/mp2t"
