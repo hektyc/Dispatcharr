@@ -49,7 +49,7 @@ export const PROXY_SETTINGS_OPTIONS = {
   channel_shutdown_delay: {
     label: 'Channel Shutdown Delay',
     description:
-      'Delay in seconds before shutting down a channel after last client disconnects',
+      'Delay in seconds before shutting down a channel after last client disconnects (applies to both TS proxy and HLS output)',
   },
   channel_init_grace_period: {
     label: 'Channel Initialization Grace Period',
