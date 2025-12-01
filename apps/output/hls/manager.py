@@ -223,7 +223,12 @@ class HLSChannelSession:
             self._monitor_thread.start()
 
             # Notify client manager that channel is active
-            hls_client_manager.set_channel_active(self.channel_uuid, self.stream_url)
+            # IMPORTANT: Pass PID so any worker can stop the process
+            hls_client_manager.set_channel_active(
+                self.channel_uuid,
+                self.stream_url,
+                pid=self.process.pid
+            )
 
             logger.info(f"HLS output started for {self.channel_uuid}, PID: {self.process.pid}")
             return True

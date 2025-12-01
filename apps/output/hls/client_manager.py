@@ -364,23 +364,35 @@ class HLSClientManager:
         except Exception as e:
             logger.debug(f"Failed to trigger HLS stats update: {e}")
 
-    def set_channel_active(self, channel_uuid: str, stream_url: str = None):
-        """Mark a channel as having an active HLS session."""
+    def set_channel_active(self, channel_uuid: str, stream_url: str = None, pid: int = None):
+        """Mark a channel as having an active HLS session.
+
+        Args:
+            channel_uuid: The channel UUID
+            stream_url: The stream URL being processed
+            pid: The FFmpeg process ID (critical for multi-worker cleanup)
+        """
         try:
             if self.redis_client:
                 current_time = str(time.time())
                 metadata_key = self._get_channel_metadata_key(channel_uuid)
 
-                self.redis_client.hset(metadata_key, mapping={
+                mapping = {
                     "state": "running",
                     "type": "hls",
                     "init_time": current_time,
                     "last_activity": current_time,
                     "url": stream_url or "",
-                })
+                }
+
+                # Store PID so any worker can stop the process
+                if pid is not None:
+                    mapping["pid"] = str(pid)
+
+                self.redis_client.hset(metadata_key, mapping=mapping)
                 self.redis_client.expire(metadata_key, self.CLIENT_TTL * 10)
 
-                logger.info(f"HLS channel marked active: {channel_uuid}")
+                logger.info(f"HLS channel marked active: {channel_uuid} (PID: {pid})")
                 self._trigger_stats_update()
 
         except Exception as e:
@@ -475,9 +487,6 @@ class HLSClientManager:
             return
 
         try:
-            # Import here to avoid circular imports
-            from .manager import hls_manager
-
             # Scan for all HLS channel metadata keys
             channels_to_check = []
             cursor = 0
@@ -538,11 +547,9 @@ class HLSClientManager:
                             f"with no clients - stopping session"
                         )
 
-                        # Stop the HLS session
-                        hls_manager.stop_session(channel_uuid)
-
-                        # Clean up Redis keys (session.stop() should do this but be sure)
-                        self.set_channel_inactive(channel_uuid)
+                        # Stop the HLS session using PID from Redis
+                        # This works across workers since PID is stored in Redis
+                        self._stop_session_by_pid(channel_uuid, metadata_key)
 
                     elif client_count == 0 and inactive_seconds > 5:
                         # Log a warning that we're tracking inactivity
@@ -557,6 +564,66 @@ class HLSClientManager:
 
         except Exception as e:
             logger.error(f"Error in HLS cleanup check: {e}")
+
+    def _stop_session_by_pid(self, channel_uuid: str, metadata_key: str):
+        """
+        Stop an HLS session using the PID stored in Redis.
+
+        This allows any worker to stop an FFmpeg process started by another worker.
+        After killing the process, cleans up files and Redis keys.
+        """
+        import os
+        import signal
+        import shutil
+        from .config import hls_config
+
+        try:
+            # Get PID from Redis
+            pid_str = self.redis_client.hget(metadata_key, "pid")
+
+            if pid_str:
+                pid = int(pid_str)
+                try:
+                    # Try to terminate the process gracefully first
+                    os.kill(pid, signal.SIGTERM)
+                    logger.info(f"Sent SIGTERM to HLS FFmpeg process {pid} for channel {channel_uuid}")
+
+                    # Give it a moment to clean up
+                    import time
+                    time.sleep(1)
+
+                    # Check if still running and force kill if needed
+                    try:
+                        os.kill(pid, 0)  # This just checks if process exists
+                        os.kill(pid, signal.SIGKILL)
+                        logger.info(f"Sent SIGKILL to HLS FFmpeg process {pid}")
+                    except OSError:
+                        pass  # Process already dead
+
+                except OSError as e:
+                    if e.errno == 3:  # No such process
+                        logger.debug(f"HLS FFmpeg process {pid} already terminated")
+                    else:
+                        logger.error(f"Error killing HLS FFmpeg process {pid}: {e}")
+            else:
+                logger.warning(f"No PID found in Redis for HLS channel {channel_uuid}")
+
+            # Clean up HLS files
+            channel_path = hls_config.get_channel_path(channel_uuid)
+            if os.path.exists(channel_path):
+                try:
+                    shutil.rmtree(channel_path)
+                    logger.info(f"Cleaned up HLS directory: {channel_path}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up HLS directory {channel_path}: {e}")
+
+            # Clean up Redis keys
+            self.set_channel_inactive(channel_uuid)
+
+            logger.info(f"HLS session stopped for channel {channel_uuid}")
+
+        except Exception as e:
+            logger.error(f"Error stopping HLS session {channel_uuid}: {e}")
 
     def get_inactivity_timeout(self) -> int:
         """Get the configured inactivity timeout in seconds."""

@@ -493,7 +493,12 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
     def _get_output_path_from_env(self):
         """Get the HLS output path from environment variable."""
         import os
-        return os.environ.get("HLS_OUTPUT_PATH", "/data/hls")
+        path = os.environ.get("HLS_OUTPUT_PATH", "/data/hls")
+        # Debug: Log what we're reading
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"HLS_OUTPUT_PATH from env: '{path}' (env key exists: {'HLS_OUTPUT_PATH' in os.environ})")
+        return path
 
     def list(self, request):
         """Get current HLS output settings.
