@@ -26,10 +26,11 @@ class HLSClientManager:
 
     # Redis key patterns
     CHANNEL_KEY_PREFIX = "hls_output:channel:"
-    CLIENT_TTL = 60  # Seconds before client is considered disconnected
-    HEARTBEAT_INTERVAL = 10  # Seconds between heartbeat updates
+    CLIENT_TTL = 15  # Seconds before client key expires (short for quick detection)
+    HEARTBEAT_INTERVAL = 5  # Seconds between heartbeat updates
     CLEANUP_CHECK_INTERVAL = 1  # Seconds between cleanup checks (fast for quick response)
     DEFAULT_INACTIVITY_TIMEOUT = 5  # Fallback if database setting unavailable
+    LOCK_TTL = 30  # Seconds to hold cleanup lock
 
     _instance = None
     _lock = threading.Lock()
@@ -87,7 +88,30 @@ class HLSClientManager:
     def _get_channel_metadata_key(self, channel_uuid: str) -> str:
         """Get Redis key for channel metadata."""
         return f"{self.CHANNEL_KEY_PREFIX}{channel_uuid}:metadata"
-    
+
+    def _get_cleanup_lock_key(self, channel_uuid: str) -> str:
+        """Get Redis key for cleanup lock (prevents race conditions)."""
+        return f"{self.CHANNEL_KEY_PREFIX}{channel_uuid}:cleanup_lock"
+
+    def _acquire_cleanup_lock(self, channel_uuid: str) -> bool:
+        """
+        Try to acquire a distributed lock for cleanup operations.
+        Returns True if lock acquired, False if another worker holds it.
+        """
+        if not self.redis_client:
+            return True  # Allow cleanup if Redis unavailable
+
+        lock_key = self._get_cleanup_lock_key(channel_uuid)
+        # SETNX returns True only if key didn't exist
+        acquired = self.redis_client.set(lock_key, "1", nx=True, ex=self.LOCK_TTL)
+        return bool(acquired)
+
+    def _release_cleanup_lock(self, channel_uuid: str):
+        """Release the cleanup lock."""
+        if self.redis_client:
+            lock_key = self._get_cleanup_lock_key(channel_uuid)
+            self.redis_client.delete(lock_key)
+
     def add_client(self, channel_uuid: str, client_id: str, client_ip: str,
                    user_agent: str = None) -> bool:
         """
@@ -524,43 +548,37 @@ class HLSClientManager:
                     last_activity = float(last_activity_str)
                     inactive_seconds = current_time - last_activity
 
-                    # Check if there are any active clients
-                    clients_key = self._get_channel_clients_key(channel_uuid)
-                    client_count = self.redis_client.scard(clients_key) or 0
-
-                    # Also check if any individual client keys still exist (TTL-based)
-                    # This is a more accurate check since client keys expire with TTL
-                    if client_count > 0:
-                        # Verify clients are actually active (keys haven't expired)
-                        client_ids = list(self.redis_client.smembers(clients_key) or set())
-                        active_clients = 0
-                        for client_id in client_ids:
-                            client_key = self._get_client_key(channel_uuid, client_id)
-                            if self.redis_client.exists(client_key):
-                                active_clients += 1
-                        client_count = active_clients
-
                     # Get shutdown delay from database (same setting as TS proxy)
                     shutdown_delay = self._get_shutdown_delay()
 
-                    if client_count == 0 and inactive_seconds > shutdown_delay:
-                        # No active clients and no recent activity - stop the session
-                        logger.info(
-                            f"HLS channel {channel_uuid} inactive for {inactive_seconds:.1f}s "
-                            f"with no clients (shutdown_delay={shutdown_delay}s) - stopping session"
-                        )
+                    # Check if last activity is older than shutdown_delay
+                    # This is the key fix: we track last_activity time directly
+                    # rather than waiting for client TTL expiry
+                    if inactive_seconds > shutdown_delay:
+                        # Try to acquire cleanup lock (prevents race condition)
+                        if not self._acquire_cleanup_lock(channel_uuid):
+                            logger.debug(
+                                f"HLS channel {channel_uuid} cleanup already in progress "
+                                f"by another worker"
+                            )
+                            continue
 
-                        # Stop the HLS session using PID from Redis
-                        # This works across workers since PID is stored in Redis
-                        self._stop_session_by_pid(channel_uuid, metadata_key)
+                        try:
+                            # Double-check metadata still exists after acquiring lock
+                            if not self.redis_client.exists(metadata_key):
+                                continue
 
-                    elif client_count == 0 and inactive_seconds > 1:
-                        # Log a debug message that we're tracking inactivity
-                        logger.debug(
-                            f"HLS channel {channel_uuid} no clients, "
-                            f"inactive for {inactive_seconds:.1f}s "
-                            f"(will stop after {shutdown_delay}s)"
-                        )
+                            # No recent activity - stop the session
+                            logger.info(
+                                f"HLS channel {channel_uuid} inactive for {inactive_seconds:.1f}s "
+                                f"(shutdown_delay={shutdown_delay}s) - stopping session"
+                            )
+
+                            # Stop the HLS session using PID from Redis
+                            # This works across workers since PID is stored in Redis
+                            self._stop_session_by_pid(channel_uuid, metadata_key)
+                        finally:
+                            self._release_cleanup_lock(channel_uuid)
 
                 except Exception as e:
                     logger.error(f"Error checking HLS channel {channel_uuid}: {e}")
