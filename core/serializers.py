@@ -111,6 +111,7 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
     playlist_size = serializers.IntegerField(min_value=3, max_value=10, required=False, default=5)
     retention_seconds = serializers.IntegerField(min_value=0, max_value=3600, required=False, default=0)
     ll_hls_enabled = serializers.BooleanField(required=False, default=False)
+    shutdown_delay = serializers.IntegerField(min_value=0, max_value=300, required=False, default=30)
 
     def validate_segment_duration(self, value):
         if value < 2 or value > 10:
@@ -125,4 +126,9 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
     def validate_retention_seconds(self, value):
         if value < 0 or value > 3600:
             raise serializers.ValidationError("Retention must be between 0 and 3600 seconds (0 = immediate cleanup)")
+        return value
+
+    def validate_shutdown_delay(self, value):
+        if value < 0 or value > 300:
+            raise serializers.ValidationError("Shutdown delay must be between 0 and 300 seconds")
         return value

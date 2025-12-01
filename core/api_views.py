@@ -472,17 +472,24 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
 
     def _get_or_create_settings(self):
         """Get or create the HLS output settings CoreSettings entry"""
+        # Default settings with all fields
+        defaults = {
+            "segment_duration": 6,
+            "playlist_size": 5,
+            "retention_seconds": 0,
+            "ll_hls_enabled": False,
+            "shutdown_delay": 30,  # HLS-specific shutdown delay (seconds)
+        }
         try:
             settings_obj = CoreSettings.objects.get(key=HLS_OUTPUT_SETTINGS_KEY)
             settings_data = json.loads(settings_obj.value)
+            # Ensure all default fields exist (for backwards compatibility)
+            for key, value in defaults.items():
+                if key not in settings_data:
+                    settings_data[key] = value
         except CoreSettings.DoesNotExist:
             # Create default settings (output_path not included - it's from env var)
-            settings_data = {
-                "segment_duration": 6,
-                "playlist_size": 5,
-                "retention_seconds": 0,
-                "ll_hls_enabled": False,
-            }
+            settings_data = defaults.copy()
             settings_obj = CoreSettings.objects.create(
                 key=HLS_OUTPUT_SETTINGS_KEY,
                 name="HLS Output Settings",
