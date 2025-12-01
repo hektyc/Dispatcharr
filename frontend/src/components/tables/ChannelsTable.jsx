@@ -1147,11 +1147,15 @@ const ChannelsTable = ({}) => {
                     p={5}
                     variant="subtle"
                     style={{
-                      borderColor: theme.palette.custom.indigoMain,
-                      color: theme.palette.custom.indigoMain,
+                      borderColor: streamFormat === 'hls'
+                        ? theme.palette.custom.tealMain || '#20c997'
+                        : theme.palette.custom.indigoMain,
+                      color: streamFormat === 'hls'
+                        ? theme.palette.custom.tealMain || '#20c997'
+                        : theme.palette.custom.indigoMain,
                     }}
                   >
-                    M3U
+                    {streamFormat === 'hls' ? 'HLS' : 'M3U'}
                   </Button>
                 </Popover.Target>
                 <Popover.Dropdown>

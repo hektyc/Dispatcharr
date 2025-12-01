@@ -65,14 +65,62 @@ def get_direct_stream_url(channel) -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
 
+def get_stream_metadata(channel):
+    """
+    Get stream metadata for Active Connections display.
+
+    Args:
+        channel: Channel model instance
+
+    Returns:
+        dict: Stream metadata including stream_id, stream_name, m3u_profile info,
+              or empty dict on error
+    """
+    try:
+        # Get stream and profile for this channel
+        stream_id, profile_id, error_reason = channel.get_stream()
+
+        if not stream_id or not profile_id:
+            return {}
+
+        # Get the stream and M3U profile
+        from apps.channels.models import Stream
+        from apps.m3u.models import M3UAccountProfile
+
+        stream = Stream.objects.get(pk=stream_id)
+        m3u_profile = M3UAccountProfile.objects.get(pk=profile_id)
+
+        # Get M3U account info
+        m3u_account = stream.m3u_account
+
+        # Get HLS stream profile
+        hls_profile = channel.get_hls_stream_profile()
+
+        return {
+            "stream_id": str(stream_id),
+            "stream_name": stream.name,
+            "m3u_profile_id": str(profile_id),
+            "m3u_profile_name": m3u_profile.name,
+            "m3u_account_name": m3u_account.name if m3u_account else "Unknown",
+            "stream_profile": str(hls_profile.id) if hls_profile else "",
+            "stream_profile_name": hls_profile.name if hls_profile else "Unknown",
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting stream metadata for channel {channel.uuid}: {e}")
+        return {}
+
+
 class HLSChannelSession:
     """Manages HLS output for a single channel."""
 
-    def __init__(self, channel_uuid: str, stream_url: str, user_agent: str = None, channel=None):
+    def __init__(self, channel_uuid: str, stream_url: str, user_agent: str = None, channel=None,
+                 stream_metadata: dict = None):
         self.channel_uuid = channel_uuid
         self.stream_url = stream_url  # Direct stream URL (not TS proxy URL)
         self.user_agent_override = user_agent  # User agent from M3U account
         self.channel = channel  # Store channel reference for profile lookup
+        self.stream_metadata = stream_metadata or {}  # Stream metadata for Active Connections
         self.process: Optional[subprocess.Popen] = None
         self._cached_output_path = None  # Cached during session for consistency
         self.is_running = False
@@ -225,10 +273,12 @@ class HLSChannelSession:
 
             # Notify client manager that channel is active
             # IMPORTANT: Pass PID so any worker can stop the process
+            # Also pass stream metadata for Active Connections display
             hls_client_manager.set_channel_active(
                 self.channel_uuid,
                 self.stream_url,
-                pid=self.process.pid
+                pid=self.process.pid,
+                stream_metadata=self.stream_metadata
             )
 
             logger.info(f"HLS output started for {self.channel_uuid}, PID: {self.process.pid}")
@@ -596,12 +646,17 @@ class HLSChannelSession:
             logger.debug(f"Error parsing FFmpeg stats: {e}")
 
     def _update_metadata_field(self, field, value):
-        """Update a single metadata field in Redis."""
+        """Update a single metadata field in Redis.
+
+        Note: Uses 'hls_output:channel:{uuid}:metadata' key pattern to match
+        the HLSClientManager's key pattern for consistent metadata storage.
+        """
         try:
             from core.redis_client import RedisClient
             redis_client = RedisClient.get_client()
             if redis_client:
-                metadata_key = f"hls:channel:{self.channel_uuid}:metadata"
+                # Use same key pattern as HLSClientManager for consistency
+                metadata_key = f"hls_output:channel:{self.channel_uuid}:metadata"
                 redis_client.hset(metadata_key, field, str(value))
         except Exception as e:
             logger.debug(f"Error updating metadata field {field}: {e}")
@@ -713,12 +768,18 @@ class HLSOutputManager:
                 # Session exists but not running, clean it up
                 del self._sessions[channel_uuid]
 
+            # Get stream metadata for Active Connections display
+            stream_metadata = {}
+            if channel:
+                stream_metadata = get_stream_metadata(channel)
+
             # Create new session with direct stream URL and channel reference
             session = HLSChannelSession(
                 channel_uuid,
                 stream_url,
                 user_agent=user_agent,
-                channel=channel
+                channel=channel,
+                stream_metadata=stream_metadata
             )
             if session.start():
                 self._sessions[channel_uuid] = session

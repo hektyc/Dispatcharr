@@ -347,6 +347,35 @@ class HLSClientManager:
                 "started_at": get_field("init_time", "0"),
             }
 
+            # Add stream identification fields (for Active Connections display)
+            stream_id = get_field("stream_id")
+            if stream_id:
+                info["stream_id"] = int(stream_id)
+
+            stream_name = get_field("stream_name")
+            if stream_name:
+                info["stream_name"] = stream_name
+
+            stream_profile = get_field("stream_profile")
+            if stream_profile:
+                info["stream_profile"] = stream_profile
+
+            stream_profile_name = get_field("stream_profile_name")
+            if stream_profile_name:
+                info["stream_profile_name"] = stream_profile_name
+
+            m3u_profile_id = get_field("m3u_profile_id")
+            if m3u_profile_id:
+                info["m3u_profile_id"] = m3u_profile_id
+
+            m3u_profile_name = get_field("m3u_profile_name")
+            if m3u_profile_name:
+                info["m3u_profile_name"] = m3u_profile_name
+
+            m3u_account_name = get_field("m3u_account_name")
+            if m3u_account_name:
+                info["m3u_account_name"] = m3u_account_name
+
             # Add stream info fields (same as TS proxy for consistency)
             video_codec = get_field("video_codec")
             if video_codec:
@@ -452,13 +481,15 @@ class HLSClientManager:
         except Exception as e:
             logger.debug(f"Failed to trigger HLS stats update: {e}")
 
-    def set_channel_active(self, channel_uuid: str, stream_url: str = None, pid: int = None):
+    def set_channel_active(self, channel_uuid: str, stream_url: str = None, pid: int = None,
+                           stream_metadata: dict = None):
         """Mark a channel as having an active HLS session.
 
         Args:
             channel_uuid: The channel UUID
             stream_url: The stream URL being processed
             pid: The FFmpeg process ID (critical for multi-worker cleanup)
+            stream_metadata: Additional stream metadata (stream_id, stream_name, m3u_profile, etc.)
         """
         try:
             if self.redis_client:
@@ -476,6 +507,23 @@ class HLSClientManager:
                 # Store PID so any worker can stop the process
                 if pid is not None:
                     mapping["pid"] = str(pid)
+
+                # Store stream metadata for Active Connections display
+                if stream_metadata:
+                    if stream_metadata.get("stream_id"):
+                        mapping["stream_id"] = stream_metadata["stream_id"]
+                    if stream_metadata.get("stream_name"):
+                        mapping["stream_name"] = stream_metadata["stream_name"]
+                    if stream_metadata.get("stream_profile"):
+                        mapping["stream_profile"] = stream_metadata["stream_profile"]
+                    if stream_metadata.get("stream_profile_name"):
+                        mapping["stream_profile_name"] = stream_metadata["stream_profile_name"]
+                    if stream_metadata.get("m3u_profile_id"):
+                        mapping["m3u_profile_id"] = stream_metadata["m3u_profile_id"]
+                    if stream_metadata.get("m3u_profile_name"):
+                        mapping["m3u_profile_name"] = stream_metadata["m3u_profile_name"]
+                    if stream_metadata.get("m3u_account_name"):
+                        mapping["m3u_account_name"] = stream_metadata["m3u_account_name"]
 
                 self.redis_client.hset(metadata_key, mapping=mapping)
                 self.redis_client.expire(metadata_key, self.CLIENT_TTL * 10)
