@@ -379,12 +379,13 @@ class HLSChannelSession:
             )
 
             if cmd:
-                # Add hide_banner and loglevel for cleaner output
-                # Insert after 'ffmpeg' command but before other arguments
+                # Add hide_banner for cleaner output
+                # Use loglevel 'info' to capture stream info (Video:/Audio: lines)
+                # Note: 'warning' would suppress stream info needed for stats display
                 if cmd[0] == "ffmpeg":
                     cmd.insert(1, "-hide_banner")
                     cmd.insert(2, "-loglevel")
-                    cmd.insert(3, "warning")
+                    cmd.insert(3, "info")
 
                 logger.debug(f"Built HLS command from profile '{profile.name}': {cmd}")
                 return cmd
@@ -413,7 +414,7 @@ class HLSChannelSession:
         cmd = [
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "warning",
+            "-loglevel", "info",  # Need 'info' to capture stream info for stats display
             # Input options - must come before -i
             # Note: No reconnect flags - Dispatcharr core handles reconnection
             "-user_agent", user_agent,
@@ -456,12 +457,28 @@ class HLSChannelSession:
         """Read and parse FFmpeg stderr output for stream info and stats."""
         logger.info(f"HLS {self.channel_uuid} stderr reader started")
         try:
+            # Debug: Check if process and stderr are available
+            if not self.process:
+                logger.error(f"HLS {self.channel_uuid} stderr reader: process is None!")
+                return
+            if not self.process.stderr:
+                logger.error(f"HLS {self.channel_uuid} stderr reader: process.stderr is None!")
+                return
+
+            logger.info(f"HLS {self.channel_uuid} stderr reader: process PID={self.process.pid}, stderr={self.process.stderr}")
+
             buffer = b""
+            bytes_read = 0
             while self.process and self.process.stderr:
                 try:
                     byte = self.process.stderr.read(1)
                     if not byte:
+                        logger.warning(f"HLS {self.channel_uuid} stderr reader: read returned empty after {bytes_read} bytes")
                         break
+
+                    bytes_read += 1
+                    if bytes_read <= 10 or bytes_read % 1000 == 0:
+                        logger.debug(f"HLS {self.channel_uuid} stderr reader: bytes_read={bytes_read}")
 
                     buffer += byte
 
