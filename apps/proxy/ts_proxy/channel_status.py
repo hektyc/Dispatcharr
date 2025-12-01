@@ -281,9 +281,9 @@ class ChannelStatus:
         if pixel_format:
             info['pixel_format'] = pixel_format.decode('utf-8')
 
-        source_bitrate = metadata.get(ChannelMetadataField.SOURCE_BITRATE.encode('utf-8'))
-        if source_bitrate:
-            info['source_bitrate'] = float(source_bitrate.decode('utf-8'))
+        video_bitrate = metadata.get(ChannelMetadataField.VIDEO_BITRATE.encode('utf-8'))
+        if video_bitrate:
+            info['video_bitrate'] = float(video_bitrate.decode('utf-8'))
 
         audio_codec = metadata.get(ChannelMetadataField.AUDIO_CODEC.encode('utf-8'))
         if audio_codec:
@@ -314,9 +314,9 @@ class ChannelStatus:
         if actual_fps:
             info['actual_fps'] = float(actual_fps.decode('utf-8'))
 
-        ffmpeg_bitrate = metadata.get(ChannelMetadataField.FFMPEG_BITRATE.encode('utf-8'))
-        if ffmpeg_bitrate:
-            info['ffmpeg_bitrate'] = float(ffmpeg_bitrate.decode('utf-8'))
+        ffmpeg_output_bitrate = metadata.get(ChannelMetadataField.FFMPEG_OUTPUT_BITRATE.encode('utf-8'))
+        if ffmpeg_output_bitrate:
+            info['ffmpeg_output_bitrate'] = float(ffmpeg_output_bitrate.decode('utf-8'))
         stream_type = metadata.get(ChannelMetadataField.STREAM_TYPE.encode('utf-8'))
         if stream_type:
             info['stream_type'] = stream_type.decode('utf-8')
