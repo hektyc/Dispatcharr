@@ -530,17 +530,23 @@ class HLSChannelSession:
         # Track FFmpeg phases
         if line_lower.startswith('input #') or 'decoder' in line_lower:
             self._ffmpeg_input_phase = True
+            logger.debug(f"HLS {self.channel_uuid} entering input phase")
         if line_lower.startswith('output #') or 'encoder' in line_lower:
             self._ffmpeg_input_phase = False
+            logger.debug(f"HLS {self.channel_uuid} entering output phase")
 
         # Parse stream info during input phase
         if ("stream #" in line_lower and
             ("video:" in line_lower or "audio:" in line_lower) and
             self._ffmpeg_input_phase):
+            logger.info(f"HLS {self.channel_uuid} found stream line (input_phase={self._ffmpeg_input_phase}): {line}")
             if "video:" in line_lower:
                 self._parse_stream_info(line, "video")
             elif "audio:" in line_lower:
                 self._parse_stream_info(line, "audio")
+        elif "stream #" in line_lower and ("video:" in line_lower or "audio:" in line_lower):
+            # Log when we skip stream lines because we're in output phase
+            logger.debug(f"HLS {self.channel_uuid} skipping stream line (output phase): {line}")
 
         # Parse input format
         if line_lower.startswith('input #0'):
@@ -568,61 +574,82 @@ class HLSChannelSession:
     def _parse_stream_info(self, line, stream_type):
         """Parse video or audio stream info from FFmpeg output."""
         try:
+            logger.info(f"HLS {self.channel_uuid} parsing {stream_type} info from: {line}")
+
             if stream_type == "video":
                 # Parse video codec (e.g., h264, hevc, mpeg2video)
                 codec_match = re.search(r'Video:\s*(\w+)', line, re.IGNORECASE)
                 if codec_match:
-                    self._update_metadata_field("video_codec", codec_match.group(1))
+                    codec = codec_match.group(1)
+                    self._update_metadata_field("video_codec", codec)
+                    logger.info(f"HLS {self.channel_uuid} video codec: {codec}")
 
                 # Parse resolution (e.g., 1920x1080)
                 res_match = re.search(r'(\d{2,5})x(\d{2,5})', line)
                 if res_match:
                     width, height = res_match.groups()
-                    self._update_metadata_field("resolution", f"{width}x{height}")
+                    resolution = f"{width}x{height}"
+                    self._update_metadata_field("resolution", resolution)
                     self._update_metadata_field("width", width)
                     self._update_metadata_field("height", height)
+                    logger.info(f"HLS {self.channel_uuid} resolution: {resolution}")
 
                 # Parse FPS (e.g., 29.97 fps, 30 tbr)
                 fps_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:fps|tbr)', line)
                 if fps_match:
-                    self._update_metadata_field("source_fps", fps_match.group(1))
+                    fps = fps_match.group(1)
+                    self._update_metadata_field("source_fps", fps)
+                    logger.info(f"HLS {self.channel_uuid} source_fps: {fps}")
 
                 # Parse pixel format (e.g., yuv420p)
                 pix_match = re.search(r'(yuv\d+p|rgb\d+|bgr\d+)', line, re.IGNORECASE)
                 if pix_match:
-                    self._update_metadata_field("pixel_format", pix_match.group(1))
+                    pix_fmt = pix_match.group(1)
+                    self._update_metadata_field("pixel_format", pix_fmt)
+                    logger.debug(f"HLS {self.channel_uuid} pixel_format: {pix_fmt}")
 
                 # Parse video bitrate
                 bitrate_match = re.search(r'(\d+(?:\.\d+)?)\s*kb/s', line)
                 if bitrate_match:
-                    self._update_metadata_field("video_bitrate", bitrate_match.group(1))
+                    bitrate = bitrate_match.group(1)
+                    self._update_metadata_field("video_bitrate", bitrate)
+                    logger.debug(f"HLS {self.channel_uuid} video_bitrate: {bitrate}")
 
             elif stream_type == "audio":
                 # Parse audio codec (e.g., aac, mp3, ac3)
                 codec_match = re.search(r'Audio:\s*(\w+)', line, re.IGNORECASE)
                 if codec_match:
-                    self._update_metadata_field("audio_codec", codec_match.group(1))
+                    codec = codec_match.group(1)
+                    self._update_metadata_field("audio_codec", codec)
+                    logger.info(f"HLS {self.channel_uuid} audio codec: {codec}")
 
                 # Parse sample rate (e.g., 48000 Hz)
                 rate_match = re.search(r'(\d+)\s*Hz', line)
                 if rate_match:
-                    self._update_metadata_field("sample_rate", rate_match.group(1))
+                    rate = rate_match.group(1)
+                    self._update_metadata_field("sample_rate", rate)
+                    logger.debug(f"HLS {self.channel_uuid} sample_rate: {rate}")
 
                 # Parse audio channels (e.g., stereo, 5.1, mono)
                 if 'stereo' in line.lower():
                     self._update_metadata_field("audio_channels", "stereo")
+                    logger.info(f"HLS {self.channel_uuid} audio_channels: stereo")
                 elif '5.1' in line:
                     self._update_metadata_field("audio_channels", "5.1")
+                    logger.info(f"HLS {self.channel_uuid} audio_channels: 5.1")
                 elif 'mono' in line.lower():
                     self._update_metadata_field("audio_channels", "mono")
+                    logger.info(f"HLS {self.channel_uuid} audio_channels: mono")
 
                 # Parse audio bitrate
                 bitrate_match = re.search(r'(\d+(?:\.\d+)?)\s*kb/s', line)
                 if bitrate_match:
-                    self._update_metadata_field("audio_bitrate", bitrate_match.group(1))
+                    bitrate = bitrate_match.group(1)
+                    self._update_metadata_field("audio_bitrate", bitrate)
+                    logger.debug(f"HLS {self.channel_uuid} audio_bitrate: {bitrate}")
 
         except Exception as e:
-            logger.debug(f"Error parsing {stream_type} stream info: {e}")
+            logger.error(f"Error parsing {stream_type} stream info: {e}")
 
     def _parse_ffmpeg_stats(self, stats_line):
         """Parse FFmpeg stats line for speed, fps, bitrate."""
@@ -630,17 +657,31 @@ class HLSChannelSession:
             # Extract speed (e.g., "speed=1.02x")
             speed_match = re.search(r'speed=\s*([0-9.]+)x?', stats_line)
             if speed_match:
-                self._update_metadata_field("ffmpeg_speed", speed_match.group(1))
+                speed_value = speed_match.group(1)
+                self._update_metadata_field("ffmpeg_speed", speed_value)
+                logger.debug(f"HLS {self.channel_uuid} parsed speed: {speed_value}")
 
             # Extract fps (e.g., "fps= 30")
             fps_match = re.search(r'fps=\s*([0-9.]+)', stats_line)
             if fps_match:
-                self._update_metadata_field("ffmpeg_fps", fps_match.group(1))
+                fps_value = fps_match.group(1)
+                self._update_metadata_field("ffmpeg_fps", fps_value)
+                logger.debug(f"HLS {self.channel_uuid} parsed fps: {fps_value}")
 
-            # Extract bitrate (e.g., "bitrate= 406.1kbits/s")
-            bitrate_match = re.search(r'bitrate=\s*([0-9.]+)kbits/s', stats_line)
+            # Extract bitrate (e.g., "bitrate= 406.1kbits/s" or "bitrate=N/A")
+            # Match various formats: kbits/s, Mbits/s, bits/s
+            bitrate_match = re.search(r'bitrate=\s*([0-9.]+)\s*([kmg]?)bits/s', stats_line, re.IGNORECASE)
             if bitrate_match:
-                self._update_metadata_field("ffmpeg_bitrate", bitrate_match.group(1))
+                bitrate_value = float(bitrate_match.group(1))
+                unit = bitrate_match.group(2).lower()
+                # Convert to kbps
+                if unit == 'm':
+                    bitrate_value *= 1000
+                elif unit == 'g':
+                    bitrate_value *= 1000000
+                # If no unit or 'k', it's already in kbps
+                self._update_metadata_field("ffmpeg_bitrate", str(round(bitrate_value, 1)))
+                logger.debug(f"HLS {self.channel_uuid} parsed bitrate: {bitrate_value} kbps")
 
         except Exception as e:
             logger.debug(f"Error parsing FFmpeg stats: {e}")
