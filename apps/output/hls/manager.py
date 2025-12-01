@@ -127,6 +127,7 @@ class HLSChannelSession:
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._stream_profile = None  # Cache the stream profile
+        self._ffmpeg_input_phase = True  # Track if we're parsing input info (before output phase)
 
     @property
     def output_path(self):
