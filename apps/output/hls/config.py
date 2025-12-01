@@ -172,6 +172,20 @@ class HLSConfig:
         settings = self._load_settings()
         return settings.get("ll_hls_enabled", False)
 
+    @property
+    def shutdown_delay(self):
+        """Get HLS-specific shutdown delay in seconds.
+
+        This is independent from the TS Proxy shutdown delay because HLS
+        streaming has different timing characteristics (segment-based vs
+        continuous streaming).
+
+        Default is 30 seconds to account for HLS segment duration and
+        client buffering behavior.
+        """
+        settings = self._load_settings()
+        return settings.get("shutdown_delay", 30)
+
     def get_channel_path(self, channel_uuid):
         """Get the output path for a specific channel."""
         channel_path = os.path.join(self.output_path, str(channel_uuid))
@@ -200,6 +214,7 @@ class HLSConfig:
             "playlist_size": self.playlist_size,
             "retention_seconds": self.retention_seconds,
             "ll_hls_enabled": self.ll_hls_enabled,
+            "shutdown_delay": self.shutdown_delay,
         }
 
 

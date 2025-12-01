@@ -276,7 +276,7 @@ class HLSClientManager:
         return channels
 
     def _get_channel_info(self, channel_uuid: str) -> Optional[dict]:
-        """Get detailed info for a channel including clients."""
+        """Get detailed info for a channel including clients and stream info."""
         try:
             if not self.redis_client:
                 return None
@@ -286,6 +286,20 @@ class HLSClientManager:
 
             if not metadata:
                 return None
+
+            # Helper to decode Redis bytes
+            def get_field(field_name, default=None, cast=str):
+                """Get a field from metadata, handling bytes and type casting."""
+                key = field_name.encode('utf-8') if isinstance(field_name, str) else field_name
+                value = metadata.get(key) or metadata.get(field_name)
+                if value is None:
+                    return default
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8')
+                try:
+                    return cast(value) if cast != str else value
+                except (ValueError, TypeError):
+                    return default
 
             # Get client count
             clients_key = self._get_channel_clients_key(channel_uuid)
@@ -308,7 +322,7 @@ class HLSClientManager:
                     })
 
             # Calculate uptime
-            init_time = float(metadata.get("init_time", time.time()))
+            init_time = float(get_field("init_time", time.time(), float))
             uptime = time.time() - init_time
 
             # Try to get channel name from database
@@ -321,16 +335,65 @@ class HLSClientManager:
             except Exception:
                 pass
 
-            return {
+            # Build info dict with all available fields
+            info = {
                 "channel_id": channel_uuid,
                 "channel_name": channel_name,
-                "state": metadata.get("state", "unknown"),
+                "state": get_field("state", "unknown"),
                 "type": "hls",
                 "client_count": client_count,
                 "clients": clients,
                 "uptime": uptime,
-                "started_at": metadata.get("init_time", "0"),
+                "started_at": get_field("init_time", "0"),
             }
+
+            # Add stream info fields (same as TS proxy for consistency)
+            video_codec = get_field("video_codec")
+            if video_codec:
+                info["video_codec"] = video_codec
+
+            resolution = get_field("resolution")
+            if resolution:
+                info["resolution"] = resolution
+
+            source_fps = get_field("source_fps", cast=float)
+            if source_fps:
+                info["source_fps"] = source_fps
+
+            audio_codec = get_field("audio_codec")
+            if audio_codec:
+                info["audio_codec"] = audio_codec
+
+            audio_channels = get_field("audio_channels")
+            if audio_channels:
+                info["audio_channels"] = audio_channels
+
+            sample_rate = get_field("sample_rate", cast=int)
+            if sample_rate:
+                info["sample_rate"] = sample_rate
+
+            audio_bitrate = get_field("audio_bitrate", cast=float)
+            if audio_bitrate:
+                info["audio_bitrate"] = audio_bitrate
+
+            stream_type = get_field("stream_type")
+            if stream_type:
+                info["stream_type"] = stream_type
+
+            # Add FFmpeg performance stats
+            ffmpeg_speed = get_field("ffmpeg_speed", cast=float)
+            if ffmpeg_speed:
+                info["ffmpeg_speed"] = ffmpeg_speed
+
+            ffmpeg_fps = get_field("ffmpeg_fps", cast=float)
+            if ffmpeg_fps:
+                info["ffmpeg_fps"] = ffmpeg_fps
+
+            ffmpeg_bitrate = get_field("ffmpeg_bitrate", cast=float)
+            if ffmpeg_bitrate:
+                info["ffmpeg_bitrate"] = ffmpeg_bitrate
+
+            return info
 
         except Exception as e:
             logger.error(f"Error getting HLS channel info for {channel_uuid}: {e}")
@@ -664,16 +727,21 @@ class HLSClientManager:
 
     def _get_shutdown_delay(self) -> int:
         """
-        Get the channel shutdown delay from the database.
+        Get the HLS-specific channel shutdown delay from the database.
 
-        Uses the same setting as TS proxy (Settings -> TS/HLS Output -> Channel Shutdown Delay).
-        Falls back to DEFAULT_INACTIVITY_TIMEOUT if database is unavailable.
+        This is independent from the TS Proxy shutdown delay because HLS
+        streaming has different timing characteristics:
+        - HLS clients fetch segments every ~6 seconds (segment duration)
+        - Between segment requests, there's naturally no activity
+        - A longer shutdown delay is needed to avoid premature session termination
+
+        Falls back to DEFAULT_INACTIVITY_TIMEOUT (30s) if database is unavailable.
         """
         try:
-            from apps.proxy.ts_proxy.config_helper import ConfigHelper
-            return ConfigHelper.channel_shutdown_delay()
+            from .config import hls_config
+            return hls_config.shutdown_delay
         except Exception as e:
-            logger.debug(f"Could not get shutdown delay from database: {e}")
+            logger.debug(f"Could not get HLS shutdown delay from config: {e}")
             return self.DEFAULT_INACTIVITY_TIMEOUT
 
     def get_inactivity_timeout(self) -> int:

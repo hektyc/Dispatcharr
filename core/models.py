@@ -434,7 +434,11 @@ class CoreSettings(models.Model):
         import json
         try:
             settings_json = cls.objects.get(key=HLS_OUTPUT_SETTINGS_KEY).value
-            return json.loads(settings_json)
+            settings = json.loads(settings_json)
+            # Ensure shutdown_delay has a default if not present
+            if "shutdown_delay" not in settings:
+                settings["shutdown_delay"] = 30
+            return settings
         except (cls.DoesNotExist, json.JSONDecodeError):
             # Return defaults if not found or invalid JSON
             return {
@@ -443,6 +447,7 @@ class CoreSettings(models.Model):
                 "playlist_size": 5,
                 "retention_seconds": 0,
                 "ll_hls_enabled": False,
+                "shutdown_delay": 30,  # HLS-specific shutdown delay (seconds)
             }
 
     @classmethod

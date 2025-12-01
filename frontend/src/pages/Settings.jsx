@@ -197,13 +197,14 @@ const SettingsPage = () => {
   const [rehashSuccess, setRehashSuccess] = useState(false);
   const [rehashConfirmOpen, setRehashConfirmOpen] = useState(false);
 
-  // HLS Output Settings state
+  // HLS Proxy Settings state
   const [hlsSettings, setHlsSettings] = useState({
     output_path: '/data/hls',
     segment_duration: 6,
     playlist_size: 5,
     retention_seconds: 0,
     ll_hls_enabled: false,
+    shutdown_delay: 30,
   });
   const [hlsSettingsSaved, setHlsSettingsSaved] = useState(false);
   const [hlsSettingsLoading, setHlsSettingsLoading] = useState(false);
@@ -1147,7 +1148,7 @@ const SettingsPage = () => {
               </Accordion.Item>
 
               <Accordion.Item value="hls-settings">
-                <Accordion.Control>HLS Output</Accordion.Control>
+                <Accordion.Control>HLS Proxy</Accordion.Control>
                 <Accordion.Panel>
                   <Stack gap="md">
                     {hlsSettingsSaved && (
@@ -1158,7 +1159,7 @@ const SettingsPage = () => {
                       />
                     )}
                     <Text size="sm" c="dimmed">
-                      Configure HLS (HTTP Live Streaming) output settings. HLS
+                      Configure HLS (HTTP Live Streaming) proxy settings. HLS
                       output can be enabled per M3U playlist using the format
                       toggle in the M3U popover on the Channels page.
                     </Text>
@@ -1174,6 +1175,19 @@ const SettingsPage = () => {
                           cursor: 'not-allowed',
                         },
                       }}
+                    />
+                    <NumberInput
+                      label="Shutdown Delay (seconds)"
+                      description="Time to wait after last client disconnects before stopping the HLS stream. HLS clients fetch segments every 6 seconds, so this should be higher than segment duration."
+                      value={hlsSettings.shutdown_delay}
+                      onChange={(value) =>
+                        setHlsSettings((prev) => ({
+                          ...prev,
+                          shutdown_delay: value,
+                        }))
+                      }
+                      min={0}
+                      max={300}
                     />
                     <NumberInput
                       label="Segment Duration"

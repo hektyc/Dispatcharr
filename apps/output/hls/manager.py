@@ -2,6 +2,7 @@
 # Manages FFmpeg processes for HLS segment generation
 
 import os
+import re
 import time
 import subprocess
 import threading
@@ -346,7 +347,12 @@ class HLSChannelSession:
             return self._build_fallback_command()
 
     def _build_fallback_command(self):
-        """Build a fallback FFmpeg command when no profile is available."""
+        """Build a fallback FFmpeg command when no profile is available.
+
+        Note: Reconnect flags are NOT included here because Dispatcharr's core
+        logic handles stream reconnection at a higher level. Having FFmpeg's
+        reconnect flags conflicts with this behavior.
+        """
         segment_duration = hls_config.segment_duration
         playlist_size = hls_config.playlist_size
         playlist_path = os.path.join(self.output_path, "stream.m3u8")
@@ -358,9 +364,7 @@ class HLSChannelSession:
             "-hide_banner",
             "-loglevel", "warning",
             # Input options - must come before -i
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
+            # Note: No reconnect flags - Dispatcharr core handles reconnection
             "-user_agent", user_agent,
             "-i", self.stream_url,
             # Output options
@@ -375,18 +379,232 @@ class HLSChannelSession:
         return cmd
 
     def _monitor_process(self):
-        """Monitor FFmpeg process and log any errors."""
+        """Monitor FFmpeg process, parse output for stream info and stats."""
+        self._ffmpeg_input_phase = True  # Track if we're still parsing input info
+
+        # Start stderr reader thread
+        stderr_thread = threading.Thread(
+            target=self._read_ffmpeg_stderr,
+            daemon=True,
+            name=f"hls-stderr-{self.channel_uuid[:8]}"
+        )
+        stderr_thread.start()
+
         while not self._stop_event.is_set() and self.process:
             if self.process.poll() is not None:
                 # Process ended unexpectedly
                 if not self._stop_event.is_set():
-                    stderr = self.process.stderr.read().decode() if self.process.stderr else ""
-                    logger.error(f"FFmpeg for {self.channel_uuid} exited unexpectedly: {stderr}")
+                    logger.error(f"FFmpeg for {self.channel_uuid} exited unexpectedly")
                     self.is_running = False
                     # Cleanup segments when process exits unexpectedly
                     self._cleanup_all()
                 break
             time.sleep(1)
+
+    def _read_ffmpeg_stderr(self):
+        """Read and parse FFmpeg stderr output for stream info and stats."""
+        try:
+            buffer = b""
+            while self.process and self.process.stderr:
+                try:
+                    byte = self.process.stderr.read(1)
+                    if not byte:
+                        break
+
+                    buffer += byte
+
+                    # Check for frame= at the start of buffer (stats line)
+                    if buffer == b"frame=":
+                        while True:
+                            next_byte = self.process.stderr.read(1)
+                            if not next_byte:
+                                break
+                            buffer += next_byte
+                            if next_byte in (b'\r', b'\n'):
+                                break
+                            if len(buffer) > 200:
+                                break
+
+                        if buffer.strip():
+                            try:
+                                stats_text = buffer.decode('utf-8', errors='ignore').strip()
+                                if stats_text and "frame=" in stats_text:
+                                    self._parse_ffmpeg_stats(stats_text)
+                            except Exception as e:
+                                logger.debug(f"Error parsing stats: {e}")
+                        buffer = b""
+                        continue
+
+                    # Handle line breaks
+                    elif byte == b'\n':
+                        if buffer.strip():
+                            line_text = buffer.decode('utf-8', errors='ignore').strip()
+                            self._process_ffmpeg_line(line_text)
+                        buffer = b""
+
+                    # Handle carriage returns
+                    elif byte == b'\r':
+                        if b"frame=" in buffer:
+                            try:
+                                stats_text = buffer.decode('utf-8', errors='ignore').strip()
+                                if stats_text and "frame=" in stats_text:
+                                    self._parse_ffmpeg_stats(stats_text)
+                            except Exception as e:
+                                logger.debug(f"Error parsing stats: {e}")
+                        elif buffer.strip():
+                            line_text = buffer.decode('utf-8', errors='ignore').strip()
+                            self._process_ffmpeg_line(line_text)
+                        buffer = b""
+
+                    # Prevent buffer overflow
+                    elif len(buffer) > 1024 and b"frame=" not in buffer:
+                        if buffer.strip():
+                            line_text = buffer.decode('utf-8', errors='ignore').strip()
+                            self._process_ffmpeg_line(line_text)
+                        buffer = b""
+
+                except Exception as e:
+                    logger.debug(f"Error reading stderr byte: {e}")
+                    break
+
+        except Exception as e:
+            logger.debug(f"Error in stderr reader for {self.channel_uuid}: {e}")
+
+    def _process_ffmpeg_line(self, line):
+        """Process a line of FFmpeg output."""
+        if not line:
+            return
+
+        line_lower = line.lower()
+
+        # Track FFmpeg phases
+        if line_lower.startswith('input #') or 'decoder' in line_lower:
+            self._ffmpeg_input_phase = True
+        if line_lower.startswith('output #') or 'encoder' in line_lower:
+            self._ffmpeg_input_phase = False
+
+        # Parse stream info during input phase
+        if ("stream #" in line_lower and
+            ("video:" in line_lower or "audio:" in line_lower) and
+            self._ffmpeg_input_phase):
+            if "video:" in line_lower:
+                self._parse_stream_info(line, "video")
+            elif "audio:" in line_lower:
+                self._parse_stream_info(line, "audio")
+
+        # Parse input format
+        if line_lower.startswith('input #0'):
+            self._parse_input_format(line)
+
+        # Log errors and warnings
+        if any(kw in line_lower for kw in ['error', 'failed', 'cannot', 'invalid']):
+            logger.error(f"FFmpeg HLS {self.channel_uuid}: {line}")
+        elif any(kw in line_lower for kw in ['warning', 'deprecated']):
+            logger.warning(f"FFmpeg HLS {self.channel_uuid}: {line}")
+        elif any(kw in line_lower for kw in ['input', 'output', 'stream', 'video', 'audio']):
+            logger.info(f"FFmpeg HLS {self.channel_uuid}: {line}")
+
+    def _parse_input_format(self, line):
+        """Parse input format from FFmpeg output (e.g., mpegts, hls, flv)."""
+        try:
+            match = re.search(r'Input #\d+,\s*([^,]+)', line)
+            if match:
+                input_format = match.group(1).strip()
+                self._update_metadata_field("stream_type", input_format)
+                logger.debug(f"HLS {self.channel_uuid} input format: {input_format}")
+        except Exception as e:
+            logger.debug(f"Error parsing input format: {e}")
+
+    def _parse_stream_info(self, line, stream_type):
+        """Parse video or audio stream info from FFmpeg output."""
+        try:
+            if stream_type == "video":
+                # Parse video codec (e.g., h264, hevc, mpeg2video)
+                codec_match = re.search(r'Video:\s*(\w+)', line, re.IGNORECASE)
+                if codec_match:
+                    self._update_metadata_field("video_codec", codec_match.group(1))
+
+                # Parse resolution (e.g., 1920x1080)
+                res_match = re.search(r'(\d{2,5})x(\d{2,5})', line)
+                if res_match:
+                    width, height = res_match.groups()
+                    self._update_metadata_field("resolution", f"{width}x{height}")
+                    self._update_metadata_field("width", width)
+                    self._update_metadata_field("height", height)
+
+                # Parse FPS (e.g., 29.97 fps, 30 tbr)
+                fps_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:fps|tbr)', line)
+                if fps_match:
+                    self._update_metadata_field("source_fps", fps_match.group(1))
+
+                # Parse pixel format (e.g., yuv420p)
+                pix_match = re.search(r'(yuv\d+p|rgb\d+|bgr\d+)', line, re.IGNORECASE)
+                if pix_match:
+                    self._update_metadata_field("pixel_format", pix_match.group(1))
+
+                # Parse video bitrate
+                bitrate_match = re.search(r'(\d+(?:\.\d+)?)\s*kb/s', line)
+                if bitrate_match:
+                    self._update_metadata_field("video_bitrate", bitrate_match.group(1))
+
+            elif stream_type == "audio":
+                # Parse audio codec (e.g., aac, mp3, ac3)
+                codec_match = re.search(r'Audio:\s*(\w+)', line, re.IGNORECASE)
+                if codec_match:
+                    self._update_metadata_field("audio_codec", codec_match.group(1))
+
+                # Parse sample rate (e.g., 48000 Hz)
+                rate_match = re.search(r'(\d+)\s*Hz', line)
+                if rate_match:
+                    self._update_metadata_field("sample_rate", rate_match.group(1))
+
+                # Parse audio channels (e.g., stereo, 5.1, mono)
+                if 'stereo' in line.lower():
+                    self._update_metadata_field("audio_channels", "stereo")
+                elif '5.1' in line:
+                    self._update_metadata_field("audio_channels", "5.1")
+                elif 'mono' in line.lower():
+                    self._update_metadata_field("audio_channels", "mono")
+
+                # Parse audio bitrate
+                bitrate_match = re.search(r'(\d+(?:\.\d+)?)\s*kb/s', line)
+                if bitrate_match:
+                    self._update_metadata_field("audio_bitrate", bitrate_match.group(1))
+
+        except Exception as e:
+            logger.debug(f"Error parsing {stream_type} stream info: {e}")
+
+    def _parse_ffmpeg_stats(self, stats_line):
+        """Parse FFmpeg stats line for speed, fps, bitrate."""
+        try:
+            # Extract speed (e.g., "speed=1.02x")
+            speed_match = re.search(r'speed=\s*([0-9.]+)x?', stats_line)
+            if speed_match:
+                self._update_metadata_field("ffmpeg_speed", speed_match.group(1))
+
+            # Extract fps (e.g., "fps= 30")
+            fps_match = re.search(r'fps=\s*([0-9.]+)', stats_line)
+            if fps_match:
+                self._update_metadata_field("ffmpeg_fps", fps_match.group(1))
+
+            # Extract bitrate (e.g., "bitrate= 406.1kbits/s")
+            bitrate_match = re.search(r'bitrate=\s*([0-9.]+)kbits/s', stats_line)
+            if bitrate_match:
+                self._update_metadata_field("ffmpeg_bitrate", bitrate_match.group(1))
+
+        except Exception as e:
+            logger.debug(f"Error parsing FFmpeg stats: {e}")
+
+    def _update_metadata_field(self, field, value):
+        """Update a single metadata field in Redis."""
+        try:
+            from core.redis_client import RedisClient
+            redis_client = RedisClient.get_client()
+            if redis_client:
+                metadata_key = f"hls:channel:{self.channel_uuid}:metadata"
+                redis_client.hset(metadata_key, field, str(value))
+        except Exception as e:
+            logger.debug(f"Error updating metadata field {field}: {e}")
 
     def _cleanup_segments(self):
         """Remove all HLS segments and playlist files for this channel.
