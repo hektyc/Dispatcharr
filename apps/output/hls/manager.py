@@ -10,6 +10,7 @@ import shlex
 import logging
 from typing import Dict, Optional, Tuple
 from .config import hls_config
+from .client_manager import hls_client_manager
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class HLSChannelSession:
         self.user_agent_override = user_agent  # User agent from M3U account
         self.channel = channel  # Store channel reference for profile lookup
         self.process: Optional[subprocess.Popen] = None
-        self._output_path = None  # Will be set on start() from current config
+        self._cached_output_path = None  # Cached during session for consistency
         self.is_running = False
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
@@ -84,20 +85,22 @@ class HLSChannelSession:
 
         Returns the cached path if set, otherwise gets fresh path from config.
         The path is cached once start() is called to ensure consistency during
-        the session, but is refreshed if a new session starts.
+        the session (so FFmpeg writes to same location as we're reading from).
         """
-        if self._output_path is None:
-            self._output_path = hls_config.get_channel_path(self.channel_uuid)
-        return self._output_path
+        if self._cached_output_path is None:
+            self._cached_output_path = hls_config.get_channel_path(self.channel_uuid)
+            logger.info(f"HLS session output path for {self.channel_uuid}: {self._cached_output_path}")
+        return self._cached_output_path
 
     def _refresh_output_path(self):
         """Refresh the output path from current config settings.
 
         This should be called at the start of a new session to pick up
-        any changes to the HLS output path setting.
+        any changes to the HLS output path setting. The path is then cached
+        for the duration of the session.
         """
-        self._output_path = hls_config.get_channel_path(self.channel_uuid)
-        logger.debug(f"Refreshed HLS output path for {self.channel_uuid}: {self._output_path}")
+        self._cached_output_path = hls_config.get_channel_path(self.channel_uuid)
+        logger.info(f"Refreshed HLS output path for {self.channel_uuid}: {self._cached_output_path}")
 
     def _ensure_output_directory(self):
         """
@@ -219,6 +222,9 @@ class HLSChannelSession:
             )
             self._monitor_thread.start()
 
+            # Notify client manager that channel is active
+            hls_client_manager.set_channel_active(self.channel_uuid, self.stream_url)
+
             logger.info(f"HLS output started for {self.channel_uuid}, PID: {self.process.pid}")
             return True
         except Exception as e:
@@ -247,6 +253,9 @@ class HLSChannelSession:
                 self.process = None
 
         self.is_running = False
+
+        # Notify client manager that channel is inactive
+        hls_client_manager.set_channel_inactive(self.channel_uuid)
 
         # Cleanup based on retention settings
         # Use _cleanup_all() to remove both files AND directory

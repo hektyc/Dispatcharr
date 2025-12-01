@@ -29,8 +29,9 @@ class HLSConfig:
     DEFAULT_RETENTION_SECONDS = 0  # 0 = delete immediately when channel stops
 
     def __init__(self):
-        # Cache the output path from environment (doesn't change at runtime)
-        self._output_path = None
+        # Output path is read fresh from environment on each access
+        # This ensures changes to the environment are picked up
+        pass
 
     def _load_settings(self):
         """Load HLS settings from CoreSettings.
@@ -54,7 +55,6 @@ class HLSConfig:
 
         This is kept for API compatibility but no longer does anything
         since settings are always read fresh from the database.
-        Note: output_path cache is NOT invalidated - it's from environment.
         """
         pass
 
@@ -62,20 +62,23 @@ class HLSConfig:
     def output_path(self):
         """Get HLS output path from environment variable.
 
-        The path is read from the HLS_OUTPUT_PATH environment variable.
+        The path is read FRESH from the HLS_OUTPUT_PATH environment variable
+        on EVERY access. This ensures changes to the environment are picked up
+        without requiring a restart of the Python process.
+
         If not set, defaults to /data/hls.
 
         This is configured via docker-compose.yml or .env file, not via
         the Settings UI, because Docker volume mounts must be defined at
         container startup.
         """
-        if self._output_path is None:
-            self._output_path = os.environ.get(HLS_OUTPUT_PATH_ENV, self.DEFAULT_OUTPUT_PATH)
-            logger.info(f"HLS output path configured from environment: {self._output_path}")
+        # Always read fresh from environment - no caching
+        path = os.environ.get(HLS_OUTPUT_PATH_ENV, self.DEFAULT_OUTPUT_PATH)
+        logger.debug(f"HLS output path from environment: {path}")
 
         # Ensure directory exists and is writable
-        self._ensure_directory(self._output_path)
-        return self._output_path
+        self._ensure_directory(path)
+        return path
 
     def _ensure_directory(self, path):
         """Ensure directory exists with proper permissions for HLS output.

@@ -2,6 +2,7 @@
 # Serves HLS playlists and segments to clients
 
 import os
+import uuid
 import logging
 from django.http import (
     HttpResponse,
@@ -15,8 +16,30 @@ from apps.channels.models import Channel
 from dispatcharr.utils import network_access_allowed
 from .manager import hls_manager, get_direct_stream_url
 from .config import hls_config
+from .client_manager import hls_client_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _get_client_id(request):
+    """Generate or retrieve a client ID for tracking."""
+    # Try to get from session or header
+    client_id = request.headers.get('X-Client-ID')
+    if not client_id:
+        # Generate based on IP and user agent
+        client_ip = _get_client_ip(request)
+        user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown')[:50]
+        # Create a unique but deterministic ID for this client
+        client_id = f"hls_{hash((client_ip, user_agent)) & 0xFFFFFFFF:08x}"
+    return client_id
+
+
+def _get_client_ip(request):
+    """Get the client IP address from the request."""
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        return x_forwarded_for.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR', 'Unknown')
 
 
 @csrf_exempt
@@ -62,6 +85,12 @@ def hls_master_playlist(request, channel_uuid: str):
     if not session.playlist_exists:
         return HttpResponse("HLS playlist not ready yet, try again", status=503)
 
+    # Track client connection
+    client_id = _get_client_id(request)
+    client_ip = _get_client_ip(request)
+    client_user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown')
+    hls_client_manager.add_client(channel_uuid, client_id, client_ip, client_user_agent)
+
     # Return redirect to the media playlist
     # For simplicity, we serve a master playlist that points to the stream playlist
     base_url = request.build_absolute_uri('/')[:-1]
@@ -105,6 +134,10 @@ def hls_media_playlist(request, channel_uuid: str):
         # Playlist doesn't exist - might need to start session
         # Return 503 to tell client to retry
         return HttpResponse("Playlist not ready", status=503)
+
+    # Update client activity (client was registered on master playlist request)
+    client_id = _get_client_id(request)
+    hls_client_manager.update_client_activity(channel_uuid, client_id)
 
     # Read and modify playlist to use absolute URLs
     try:

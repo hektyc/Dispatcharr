@@ -395,7 +395,7 @@ def fetch_channel_stats():
     redis_client = RedisClient.get_client()
 
     try:
-        # Basic info for all channels
+        # Basic info for all TS proxy channels
         channel_pattern = "ts_proxy:channel:*:metadata"
         all_channels = []
 
@@ -413,6 +413,14 @@ def fetch_channel_stats():
 
             if cursor == 0:
                 break
+
+        # Also get HLS output channels
+        try:
+            from apps.output.hls.client_manager import hls_client_manager
+            hls_channels = hls_client_manager.get_all_hls_channels()
+            all_channels.extend(hls_channels)
+        except Exception as e:
+            logger.debug(f"Could not get HLS channels: {e}")
 
         send_websocket_update(
             "updates",

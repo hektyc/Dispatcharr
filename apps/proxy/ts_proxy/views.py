@@ -648,7 +648,7 @@ def change_stream(request, channel_id):
 def channel_status(request, channel_id=None):
     """
     Returns status information about channels with detail level based on request:
-    - /status/ returns basic summary of all channels
+    - /status/ returns basic summary of all channels (TS and HLS)
     - /status/{channel_id} returns detailed info about specific channel
     """
     proxy_server = ProxyServer.get_instance()
@@ -669,7 +669,7 @@ def channel_status(request, channel_id=None):
                     {"error": f"Channel {channel_id} not found"}, status=404
                 )
         else:
-            # Basic info for all channels
+            # Basic info for all channels (TS proxy)
             channel_pattern = "ts_proxy:channel:*:metadata"
             all_channels = []
 
@@ -691,6 +691,14 @@ def channel_status(request, channel_id=None):
 
                 if cursor == 0:
                     break
+
+            # Also get HLS output channels
+            try:
+                from apps.output.hls.client_manager import hls_client_manager
+                hls_channels = hls_client_manager.get_all_hls_channels()
+                all_channels.extend(hls_channels)
+            except Exception as e:
+                logger.debug(f"Could not get HLS channels: {e}")
 
             # Send WebSocket update with the stats
             # Format it the same way the original Celery task did
