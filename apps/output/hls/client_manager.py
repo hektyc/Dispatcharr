@@ -212,14 +212,15 @@ class HLSClientManager:
             if self.redis_client:
                 current_time = str(time.time())
 
+                # Ensure client is in the set (re-add in case it expired)
+                clients_key = self._get_channel_clients_key(channel_uuid)
+                self.redis_client.sadd(clients_key, client_id)
+                self.redis_client.expire(clients_key, self.CLIENT_TTL)
+
                 # Update client last_active
                 client_key = self._get_client_key(channel_uuid, client_id)
                 self.redis_client.hset(client_key, "last_active", current_time)
                 self.redis_client.expire(client_key, self.CLIENT_TTL)
-
-                # Refresh client set TTL
-                clients_key = self._get_channel_clients_key(channel_uuid)
-                self.redis_client.expire(clients_key, self.CLIENT_TTL)
 
                 # Update channel metadata
                 metadata_key = self._get_channel_metadata_key(channel_uuid)
@@ -502,10 +503,11 @@ class HLSClientManager:
 
         A channel is considered inactive if:
         1. It has an active FFmpeg session (metadata exists in Redis)
-        2. No clients have made requests within INACTIVITY_TIMEOUT seconds
+        2. No clients are registered AND no requests within shutdown_delay seconds
 
-        The client activity is tracked by the TTL on Redis keys - if the client
-        keys have expired, it means no recent requests were made.
+        IMPORTANT: HLS clients fetch segments every ~6 seconds (segment duration).
+        We must account for this by checking client count, not just last_activity.
+        A channel with registered clients is NEVER considered inactive.
         """
         if not self.redis_client:
             return
@@ -537,7 +539,18 @@ class HLSClientManager:
 
             for channel_uuid in channels_to_check:
                 try:
-                    # Get the channel's last activity time
+                    # First check if there are any clients registered
+                    # If there are clients, the channel is ACTIVE regardless of last_activity
+                    clients_key = self._get_channel_clients_key(channel_uuid)
+                    client_count = self.redis_client.scard(clients_key) or 0
+
+                    if client_count > 0:
+                        # Channel has active clients - refresh last_activity and skip
+                        metadata_key = self._get_channel_metadata_key(channel_uuid)
+                        self.redis_client.hset(metadata_key, "last_activity", str(current_time))
+                        continue
+
+                    # No clients - check how long since last activity
                     metadata_key = self._get_channel_metadata_key(channel_uuid)
                     last_activity_str = self.redis_client.hget(metadata_key, "last_activity")
 
@@ -551,9 +564,7 @@ class HLSClientManager:
                     # Get shutdown delay from database (same setting as TS proxy)
                     shutdown_delay = self._get_shutdown_delay()
 
-                    # Check if last activity is older than shutdown_delay
-                    # This is the key fix: we track last_activity time directly
-                    # rather than waiting for client TTL expiry
+                    # Only stop if NO clients AND inactive longer than shutdown_delay
                     if inactive_seconds > shutdown_delay:
                         # Try to acquire cleanup lock (prevents race condition)
                         if not self._acquire_cleanup_lock(channel_uuid):
@@ -564,18 +575,23 @@ class HLSClientManager:
                             continue
 
                         try:
-                            # Double-check metadata still exists after acquiring lock
+                            # Double-check: still no clients after acquiring lock?
+                            client_count = self.redis_client.scard(clients_key) or 0
+                            if client_count > 0:
+                                logger.debug(f"HLS channel {channel_uuid} has {client_count} clients, skipping cleanup")
+                                continue
+
+                            # Double-check metadata still exists
                             if not self.redis_client.exists(metadata_key):
                                 continue
 
-                            # No recent activity - stop the session
+                            # No clients and inactive - stop the session
                             logger.info(
-                                f"HLS channel {channel_uuid} inactive for {inactive_seconds:.1f}s "
-                                f"(shutdown_delay={shutdown_delay}s) - stopping session"
+                                f"HLS channel {channel_uuid} has no clients and inactive for "
+                                f"{inactive_seconds:.1f}s (shutdown_delay={shutdown_delay}s) - stopping session"
                             )
 
                             # Stop the HLS session using PID from Redis
-                            # This works across workers since PID is stored in Redis
                             self._stop_session_by_pid(channel_uuid, metadata_key)
                         finally:
                             self._release_cleanup_lock(channel_uuid)

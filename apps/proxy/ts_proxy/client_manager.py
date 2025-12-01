@@ -49,7 +49,7 @@ class ClientManager:
             from apps.proxy.ts_proxy.channel_status import ChannelStatus
             import redis
 
-            # Get all channels from Redis
+            # Get all TS proxy channels from Redis
             redis_client = redis.Redis.from_url('redis://localhost:6379', decode_responses=True)
             all_channels = []
             cursor = 0
@@ -67,6 +67,14 @@ class ClientManager:
 
                 if cursor == 0:
                     break
+
+            # Also include HLS output channels
+            try:
+                from apps.output.hls.client_manager import hls_client_manager
+                hls_channels = hls_client_manager.get_all_hls_channels()
+                all_channels.extend(hls_channels)
+            except Exception as e:
+                logger.debug(f"Could not get HLS channels: {e}")
 
             # Send WebSocket update using existing infrastructure
             send_websocket_update(
