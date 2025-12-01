@@ -85,6 +85,21 @@ class HLSConfig:
 
         Returns True if directory exists and is writable, False otherwise.
         Does not raise exceptions - logs errors instead.
+
+        For ramdisk/tmpfs mounts, users should either:
+        1. Use Docker's native tmpfs mount (recommended):
+           volumes:
+             - type: tmpfs
+               target: /data/hls
+               tmpfs:
+                 size: 1073741824  # 1GB
+
+        2. Or mount a host ramdisk with proper permissions:
+           volumes:
+             - /mnt/user/ramdisk:/data/hls:rw
+
+           And ensure the host directory is writable by the container user:
+           chown -R $PUID:$PGID /mnt/user/ramdisk
         """
         try:
             if not os.path.exists(path):
@@ -100,8 +115,35 @@ class HLSConfig:
                 logger.debug(f"HLS output directory verified writable: {path}")
                 return True
             except (IOError, OSError) as e:
-                logger.error(f"HLS output directory {path} is not writable: {e}")
+                # Get current user info for helpful error message
+                import pwd
+                try:
+                    current_user = pwd.getpwuid(os.getuid())
+                    user_info = f"uid={current_user.pw_uid}, gid={current_user.pw_gid}"
+                except:
+                    user_info = f"uid={os.getuid()}"
+
+                # Check directory ownership
+                try:
+                    dir_stat = os.stat(path)
+                    dir_info = f"dir owner uid={dir_stat.st_uid}, gid={dir_stat.st_gid}"
+                except:
+                    dir_info = "could not stat directory"
+
+                logger.error(
+                    f"HLS output directory {path} is not writable: {e}. "
+                    f"Container user: {user_info}. Directory: {dir_info}. "
+                    f"Fix: Either use Docker tmpfs mount, or run 'chown -R $PUID:$PGID {path}' on the host."
+                )
                 return False
+        except PermissionError as e:
+            logger.error(
+                f"Permission denied creating HLS directory {path}: {e}. "
+                f"For ramdisk/tmpfs, use Docker's native tmpfs mount: "
+                f"volumes: [{{type: tmpfs, target: /data/hls, tmpfs: {{size: 1073741824}}}}] "
+                f"or ensure host directory is writable by container user (PUID/PGID)."
+            )
+            return False
         except Exception as e:
             logger.error(f"Failed to create/verify HLS output directory {path}: {e}")
             return False

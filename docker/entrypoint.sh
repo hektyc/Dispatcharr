@@ -129,6 +129,57 @@ echo "Setting up PostgreSQL..."
 echo "Starting init process..."
 . /app/docker/init/03-init-dispatcharr.sh
 
+# Check HLS output path permissions
+if [ -n "$HLS_OUTPUT_PATH" ]; then
+    echo "🔍 Checking HLS output path: $HLS_OUTPUT_PATH"
+
+    # Create directory if it doesn't exist
+    if [ ! -d "$HLS_OUTPUT_PATH" ]; then
+        echo "📁 Creating HLS output directory: $HLS_OUTPUT_PATH"
+        mkdir -p "$HLS_OUTPUT_PATH" 2>/dev/null || true
+    fi
+
+    # Check if directory exists and is writable
+    if [ -d "$HLS_OUTPUT_PATH" ]; then
+        # Try to create a test file
+        TEST_FILE="$HLS_OUTPUT_PATH/.hls_test_$$"
+        if su - "$POSTGRES_USER" -c "touch '$TEST_FILE' 2>/dev/null && rm -f '$TEST_FILE'"; then
+            echo "✅ HLS output path is writable by container user"
+        else
+            echo "⚠️  WARNING: HLS output path $HLS_OUTPUT_PATH is not writable by container user (PUID=$PUID, PGID=$PGID)"
+            echo "   This will cause HLS streaming to fail!"
+            echo ""
+            echo "   To fix this, choose one of these options:"
+            echo ""
+            echo "   OPTION 1 (Recommended): Use Docker tmpfs mount in docker-compose.yml:"
+            echo "     tmpfs:"
+            echo "       - /data/hls:size=1G,mode=1777"
+            echo "     (No HLS_OUTPUT_PATH needed, uses default /data/hls)"
+            echo ""
+            echo "   OPTION 2: Use container's built-in /dev/shm:"
+            echo "     environment:"
+            echo "       - HLS_OUTPUT_PATH=/dev/shm"
+            echo ""
+            echo "   OPTION 3: Fix host ramdisk permissions:"
+            echo "     Run on host: sudo chown -R $PUID:$PGID $(dirname $HLS_OUTPUT_PATH)"
+            echo ""
+            # Try to fix permissions if we're root (we are during entrypoint)
+            if [ "$(id -u)" = "0" ]; then
+                echo "   Attempting to fix permissions..."
+                if chown -R "$PUID:$PGID" "$HLS_OUTPUT_PATH" 2>/dev/null; then
+                    echo "   ✅ Permissions fixed! HLS output path is now writable."
+                else
+                    echo "   ❌ Could not fix permissions. The mount may not allow permission changes."
+                fi
+            fi
+        fi
+    else
+        echo "⚠️  WARNING: HLS output path $HLS_OUTPUT_PATH does not exist and could not be created"
+    fi
+else
+    echo "ℹ️  HLS output path not set, using default: /data/hls"
+fi
+
 # Start PostgreSQL
 echo "Starting Postgres..."
 su - postgres -c "$PG_BINDIR/pg_ctl -D ${POSTGRES_DIR} start -w -t 300 -o '-c port=${POSTGRES_PORT}'"

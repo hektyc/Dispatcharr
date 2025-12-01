@@ -9,6 +9,10 @@ services:
     depends_on:
       - db
       - redis
+    # HLS RAM disk option (recommended for high performance):
+    # Uncomment the tmpfs section below for automatic in-memory HLS segments
+    # tmpfs:
+    #   - /data/hls:size=1G,mode=1777
     environment:
       - POSTGRES_HOST=db
       - POSTGRES_DB=dispatcharr
@@ -18,9 +22,21 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - DISPATCHARR_LOG_LEVEL=info
       # HLS Output Configuration
-      # Default: /data/hls (persisted to disk)
-      # Use /dev/shm for RAM disk (faster, but lost on restart)
-      # For custom paths, ensure the volume is mounted above
+      # Default: /data/hls (persisted to disk, survives restarts)
+      #
+      # For RAM disk (faster, better SSD lifespan), choose ONE option:
+      #
+      # OPTION 1 (Recommended): Docker tmpfs mount (above in tmpfs: section)
+      #   Uncomment the tmpfs section above. No HLS_OUTPUT_PATH needed.
+      #   This automatically creates a RAM disk with correct permissions.
+      #
+      # OPTION 2: Use container's built-in /dev/shm (512MB default)
+      #   - HLS_OUTPUT_PATH=/dev/shm
+      #
+      # OPTION 3: Mount host ramdisk (requires permission setup on host)
+      #   volumes: - /mnt/user/ramdisk:/mnt/ramdisk:rw
+      #   Then run on host: chown -R $PUID:$PGID /mnt/user/ramdisk
+      #   - HLS_OUTPUT_PATH=/mnt/ramdisk
       #- HLS_OUTPUT_PATH=/dev/shm
       # Process Priority Configuration (Optional)
       # Lower values = higher priority. Range: -20 (highest) to 19 (lowest)
