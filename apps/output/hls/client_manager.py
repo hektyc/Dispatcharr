@@ -26,7 +26,10 @@ class HLSClientManager:
 
     # Redis key patterns
     CHANNEL_KEY_PREFIX = "hls_output:channel:"
-    CLIENT_TTL = 15  # Seconds before client key expires (short for quick detection)
+    # CLIENT_TTL should be slightly longer than segment duration to survive between requests
+    # HLS clients typically request segments every segment_duration seconds
+    # We use a small fixed buffer since the shutdown_delay setting controls actual cleanup timing
+    CLIENT_TTL_BUFFER = 3  # Seconds buffer on top of segment_duration for CLIENT_TTL
     HEARTBEAT_INTERVAL = 5  # Seconds between heartbeat updates
     CLEANUP_CHECK_INTERVAL = 1  # Seconds between cleanup checks (fast for quick response)
     DEFAULT_INACTIVITY_TIMEOUT = 5  # Fallback if database setting unavailable
@@ -112,6 +115,20 @@ class HLSClientManager:
             lock_key = self._get_cleanup_lock_key(channel_uuid)
             self.redis_client.delete(lock_key)
 
+    def _get_client_ttl(self) -> int:
+        """
+        Get the TTL for client keys in Redis.
+
+        This should be just long enough for clients to survive between segment requests.
+        HLS clients request segments every segment_duration seconds, so we use:
+        segment_duration + a small buffer.
+
+        The actual cleanup timing is controlled by shutdown_delay setting.
+        """
+        from apps.output.hls.config import hls_config
+        segment_duration = hls_config.segment_duration or 6
+        return segment_duration + self.CLIENT_TTL_BUFFER
+
     def add_client(self, channel_uuid: str, client_id: str, client_ip: str,
                    user_agent: str = None) -> bool:
         """
@@ -144,9 +161,10 @@ class HLSClientManager:
                 
                 # Add to client set
                 clients_key = self._get_channel_clients_key(channel_uuid)
+                client_ttl = self._get_client_ttl()
                 self.redis_client.sadd(clients_key, client_id)
-                self.redis_client.expire(clients_key, self.CLIENT_TTL)
-                
+                self.redis_client.expire(clients_key, client_ttl)
+
                 # Store client metadata
                 client_key = self._get_client_key(channel_uuid, client_id)
                 self.redis_client.hset(client_key, mapping={
@@ -155,8 +173,8 @@ class HLSClientManager:
                     "connected_at": current_time,
                     "last_active": current_time,
                 })
-                self.redis_client.expire(client_key, self.CLIENT_TTL)
-                
+                self.redis_client.expire(client_key, client_ttl)
+
                 # Update channel metadata
                 metadata_key = self._get_channel_metadata_key(channel_uuid)
                 self.redis_client.hset(metadata_key, mapping={
@@ -164,7 +182,7 @@ class HLSClientManager:
                     "type": "hls",
                     "last_activity": current_time,
                 })
-                self.redis_client.expire(metadata_key, self.CLIENT_TTL * 2)
+                self.redis_client.expire(metadata_key, client_ttl * 2)
             
             logger.info(f"HLS client connected: {client_id} for channel {channel_uuid}")
             
@@ -211,21 +229,22 @@ class HLSClientManager:
         try:
             if self.redis_client:
                 current_time = str(time.time())
+                client_ttl = self._get_client_ttl()
 
                 # Ensure client is in the set (re-add in case it expired)
                 clients_key = self._get_channel_clients_key(channel_uuid)
                 self.redis_client.sadd(clients_key, client_id)
-                self.redis_client.expire(clients_key, self.CLIENT_TTL)
+                self.redis_client.expire(clients_key, client_ttl)
 
                 # Update client last_active
                 client_key = self._get_client_key(channel_uuid, client_id)
                 self.redis_client.hset(client_key, "last_active", current_time)
-                self.redis_client.expire(client_key, self.CLIENT_TTL)
+                self.redis_client.expire(client_key, client_ttl)
 
                 # Update channel metadata
                 metadata_key = self._get_channel_metadata_key(channel_uuid)
                 self.redis_client.hset(metadata_key, "last_activity", current_time)
-                self.redis_client.expire(metadata_key, self.CLIENT_TTL * 2)
+                self.redis_client.expire(metadata_key, client_ttl * 2)
 
             return True
         except Exception as e:
@@ -526,7 +545,7 @@ class HLSClientManager:
                         mapping["m3u_account_name"] = stream_metadata["m3u_account_name"]
 
                 self.redis_client.hset(metadata_key, mapping=mapping)
-                self.redis_client.expire(metadata_key, self.CLIENT_TTL * 10)
+                self.redis_client.expire(metadata_key, self._get_client_ttl() * 10)
 
                 logger.info(f"HLS channel marked active: {channel_uuid} (PID: {pid})")
                 self._trigger_stats_update()
