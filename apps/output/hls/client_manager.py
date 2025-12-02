@@ -583,6 +583,22 @@ class HLSClientManager:
         except Exception as e:
             logger.error(f"Error setting HLS channel inactive: {e}")
 
+    def is_channel_active(self, channel_uuid: str) -> bool:
+        """Check if a channel has an active HLS session in Redis.
+
+        This is used by the monitor thread to detect if a channel was
+        intentionally stopped (e.g., by client_manager due to no clients)
+        vs. an unexpected FFmpeg crash.
+        """
+        try:
+            if self.redis_client:
+                metadata_key = self._get_channel_metadata_key(channel_uuid)
+                return self.redis_client.exists(metadata_key) > 0
+            return False
+        except Exception as e:
+            logger.error(f"Error checking if HLS channel is active: {e}")
+            return False
+
     def update_channel_metadata(self, channel_uuid: str, stream_url: str = None,
                                  stream_metadata: dict = None):
         """
@@ -797,6 +813,7 @@ class HLSClientManager:
         import os
         import signal
         import shutil
+        import time
         from .config import hls_config
 
         try:
@@ -805,32 +822,50 @@ class HLSClientManager:
 
             if pid_str:
                 pid = int(pid_str)
+                process_dead = False
                 try:
                     # Try to terminate the process gracefully first
                     os.kill(pid, signal.SIGTERM)
                     logger.info(f"Sent SIGTERM to HLS FFmpeg process {pid} for channel {channel_uuid}")
 
-                    # Give it a moment to clean up
-                    import time
-                    time.sleep(1)
+                    # Wait for process to die (up to 2 seconds)
+                    for _ in range(20):
+                        time.sleep(0.1)
+                        try:
+                            os.kill(pid, 0)  # Check if process exists
+                        except OSError:
+                            process_dead = True
+                            break
 
-                    # Check if still running and force kill if needed
-                    try:
-                        os.kill(pid, 0)  # This just checks if process exists
-                        os.kill(pid, signal.SIGKILL)
-                        logger.info(f"Sent SIGKILL to HLS FFmpeg process {pid}")
-                    except OSError:
-                        pass  # Process already dead
+                    # If still running, force kill
+                    if not process_dead:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                            logger.info(f"Sent SIGKILL to HLS FFmpeg process {pid}")
+                            # Wait for SIGKILL to take effect
+                            for _ in range(10):
+                                time.sleep(0.1)
+                                try:
+                                    os.kill(pid, 0)
+                                except OSError:
+                                    process_dead = True
+                                    break
+                        except OSError:
+                            process_dead = True
 
                 except OSError as e:
                     if e.errno == 3:  # No such process
                         logger.debug(f"HLS FFmpeg process {pid} already terminated")
+                        process_dead = True
                     else:
                         logger.error(f"Error killing HLS FFmpeg process {pid}: {e}")
+
+                if not process_dead:
+                    logger.warning(f"HLS FFmpeg process {pid} may still be running after SIGKILL")
             else:
                 logger.warning(f"No PID found in Redis for HLS channel {channel_uuid}")
 
-            # Clean up HLS files
+            # Clean up HLS files AFTER confirming process is dead
             channel_path = hls_config.get_channel_path(channel_uuid)
             if os.path.exists(channel_path):
                 try:

@@ -142,15 +142,18 @@ def hls_media_playlist(request, channel_uuid: str):
         "stream.m3u8"
     )
 
+    # Update client activity BEFORE checking if playlist exists
+    # This is critical to keep the session alive during startup when FFmpeg
+    # is still creating the playlist. Without this, the session could be
+    # killed after shutdown_delay seconds because no clients are registered.
+    client_id = _get_client_id(request)
+    hls_client_manager.update_client_activity(channel_uuid, client_id)
+
     # Check if playlist file exists on disk
     if not os.path.exists(playlist_path):
         # Playlist doesn't exist - might need to start session
         # Return 503 to tell client to retry
         return HttpResponse("Playlist not ready", status=503)
-
-    # Update client activity (client was registered on master playlist request)
-    client_id = _get_client_id(request)
-    hls_client_manager.update_client_activity(channel_uuid, client_id)
 
     # Read and modify playlist to use absolute URLs
     try:
@@ -195,13 +198,15 @@ def hls_segment(request, channel_uuid: str, segment_name: str):
 
     segment_path = os.path.join(hls_config.get_channel_path(channel_uuid), segment_name)
 
-    if not os.path.exists(segment_path):
-        return HttpResponseNotFound("Segment not found")
-
-    # Update client activity on segment requests
-    # This is important to keep the session alive while client is actively streaming
+    # Update client activity on segment requests BEFORE checking if segment exists
+    # This is critical to keep the session alive during startup when FFmpeg
+    # is still creating the first segment. Without this, the session would be
+    # killed after shutdown_delay seconds because no clients are registered.
     client_id = _get_client_id(request)
     hls_client_manager.update_client_activity(channel_uuid, client_id)
+
+    if not os.path.exists(segment_path):
+        return HttpResponseNotFound("Segment not found")
 
     # Determine content type
     if segment_name.endswith(".ts"):

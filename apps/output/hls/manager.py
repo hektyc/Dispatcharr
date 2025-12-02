@@ -501,8 +501,15 @@ class HLSChannelSession:
 
         while not self._stop_event.is_set() and self.process:
             if self.process.poll() is not None:
-                # Process ended unexpectedly
+                # Process ended - check if it was an intentional shutdown
                 if not self._stop_event.is_set():
+                    # Check if the channel was already marked inactive in Redis
+                    # This happens when client_manager kills the process due to no clients
+                    if not hls_client_manager.is_channel_active(self.channel_uuid):
+                        logger.info(f"HLS {self.channel_uuid}: FFmpeg exited, channel already inactive (intentional shutdown)")
+                        self.is_running = False
+                        break
+
                     logger.error(f"FFmpeg for {self.channel_uuid} exited unexpectedly")
                     self.is_running = False
 
