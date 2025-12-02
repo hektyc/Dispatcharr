@@ -928,8 +928,10 @@ class HLSChannelSession:
                     stream_metadata=new_metadata
                 )
 
-                # Copy tried streams to new session so it knows what we've already tried
-                new_session._tried_stream_ids = self._tried_stream_ids.copy()
+                # Reset tried streams for successful switch - the new session starts fresh
+                # Only the current stream should be marked as tried initially
+                # This allows the new session to try other streams if it also fails
+                new_session._tried_stream_ids = {stream_id}
                 new_session._current_stream_id = stream_id
 
                 # Try to start the new session
