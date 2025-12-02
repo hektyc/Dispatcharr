@@ -133,27 +133,29 @@ class HLSClientManager:
                    user_agent: str = None) -> bool:
         """
         Add a client connection for an HLS channel.
-        
+
         Args:
             channel_uuid: The channel UUID
             client_id: Unique client identifier
             client_ip: Client IP address
             user_agent: Client user agent string
-            
+
         Returns:
             True if client was added, False if already exists or error
         """
+        logger.debug(f"HLS add_client called: channel={channel_uuid}, client_id={client_id}")
         try:
             # Track locally
             with self._client_lock:
                 if channel_uuid not in self._local_clients:
                     self._local_clients[channel_uuid] = set()
-                
+
                 if client_id in self._local_clients[channel_uuid]:
-                    # Already tracked
-                    return False
-                
-                self._local_clients[channel_uuid].add(client_id)
+                    # Already tracked locally - but still need to refresh Redis
+                    logger.debug(f"HLS client {client_id} already tracked locally, refreshing Redis")
+                    # Fall through to update Redis (don't return early)
+                else:
+                    self._local_clients[channel_uuid].add(client_id)
             
             # Track in Redis
             if self.redis_client:

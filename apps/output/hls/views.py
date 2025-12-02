@@ -90,15 +90,18 @@ def hls_master_playlist(request, channel_uuid: str):
     client_user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown')
     hls_client_manager.add_client(channel_uuid, client_id, client_ip, client_user_agent)
 
-    # Wait for playlist AND enough segments to be created (up to 15 seconds)
+    # Wait for playlist, enough segments, AND FFmpeg speed to stabilize (up to 20 seconds)
     # With delete_segments enabled, FFmpeg may run faster than real-time and delete
-    # early segments before clients can request them. We need to wait for enough
-    # segments to exist that the oldest one in the playlist is available.
-    # With hls_list_size=10 and 2-second segments, we need at least 3-4 segments
-    # to give clients time to start playback before index0.ts gets deleted.
-    MIN_SEGMENTS_BEFORE_READY = 3
+    # early segments before clients can request them. We need to wait for:
+    # 1. Playlist file to exist
+    # 2. Enough segments to exist (at least 5 to have buffer room)
+    # 3. FFmpeg speed to drop below 2.0x (so segments aren't created faster than consumed)
+    MIN_SEGMENTS_BEFORE_READY = 5
+    MAX_SPEED_BEFORE_READY = 2.0  # Wait until FFmpeg is running at most 2x real-time
     playlist_ready = False
-    for _ in range(150):  # 15 seconds
+    speed_stabilized = False
+
+    for _ in range(200):  # 20 seconds (increased from 15 to allow speed stabilization)
         # Update client activity during the wait to keep session alive
         hls_client_manager.update_client_activity(channel_uuid, client_id)
 
@@ -106,13 +109,42 @@ def hls_master_playlist(request, channel_uuid: str):
             # Segment format: index0.ts, index1.ts, etc.
             segment_pattern = os.path.join(session.output_path, "index*.ts")
             segments = glob.glob(segment_pattern)
+
+            # Get current FFmpeg speed from session stats
+            current_speed = session.get_stat('ffmpeg_speed', 0.0)
+            try:
+                current_speed = float(current_speed)
+            except (ValueError, TypeError):
+                current_speed = 0.0
+
             if len(segments) >= MIN_SEGMENTS_BEFORE_READY:
-                playlist_ready = True
-                break
+                # Have enough segments - now check if speed is stable
+                if current_speed > 0 and current_speed <= MAX_SPEED_BEFORE_READY:
+                    speed_stabilized = True
+                    playlist_ready = True
+                    logger.debug(
+                        f"HLS {channel_uuid}: Ready with {len(segments)} segments, "
+                        f"speed={current_speed:.2f}x"
+                    )
+                    break
+                elif current_speed == 0:
+                    # Speed not reported yet, but have segments - accept after short delay
+                    # This handles cases where speed stats aren't being updated
+                    playlist_ready = True
+                    break
+                # else: speed too high, keep waiting for it to stabilize
+
         time.sleep(0.1)
 
     if not playlist_ready:
         return HttpResponse("HLS stream not ready yet, try again", status=503)
+
+    if not speed_stabilized:
+        # Log warning but continue - better to serve something than nothing
+        logger.warning(
+            f"HLS {channel_uuid}: Serving playlist before speed stabilization "
+            f"(may cause initial skipping)"
+        )
 
     # Return redirect to the media playlist
     # For simplicity, we serve a master playlist that points to the stream playlist

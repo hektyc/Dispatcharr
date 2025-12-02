@@ -474,7 +474,7 @@ class HLSChannelSession:
             "-hls_time", str(segment_duration),
             "-hls_list_size", str(playlist_size),
             "-hls_flags", hls_flags,
-            "-hls_delete_threshold", "3",  # Keep 3 extra segments before deletion (smoother playback)
+            "-hls_delete_threshold", "10",  # Keep 10 extra segments before deletion (smoother startup playback)
             "-hls_segment_filename", segment_pattern,
         ]
 
@@ -975,6 +975,27 @@ class HLSChannelSession:
     def playlist_exists(self):
         """Check if the playlist file exists."""
         return os.path.exists(self.playlist_path)
+
+    def get_stat(self, field: str, default=None):
+        """Get a stat value from Redis metadata.
+
+        Args:
+            field: The stat field name (e.g., 'ffmpeg_speed', 'ffmpeg_fps')
+            default: Default value if field not found
+
+        Returns:
+            The stat value or default
+        """
+        try:
+            from core.utils import RedisClient
+            redis_client = RedisClient.get_client()
+            if redis_client:
+                metadata_key = f"hls_output:channel:{self.channel_uuid}:metadata"
+                value = redis_client.hget(metadata_key, field)
+                return value if value is not None else default
+        except Exception as e:
+            logger.debug(f"HLS {self.channel_uuid} error getting stat {field}: {e}")
+        return default
 
 
 class HLSOutputManager:
