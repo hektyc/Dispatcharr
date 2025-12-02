@@ -376,12 +376,21 @@ class HLSChannelSession:
         # Get user agent
         user_agent = self._get_user_agent()
 
+        # Build HLS config dict for placeholder substitution
+        hls_config_dict = {
+            "segment_duration": hls_config.segment_duration,
+            "playlist_size": hls_config.playlist_size,
+        }
+
+        logger.info(f"HLS {self.channel_uuid}: Building command from profile '{profile.name}' with segment_duration={hls_config_dict['segment_duration']}, playlist_size={hls_config_dict['playlist_size']}")
+
         # Build command using profile
         try:
             cmd = profile.build_command(
                 stream_url=self.stream_url,
                 user_agent=user_agent,
-                hls_output_path=self.output_path
+                hls_output_path=self.output_path,
+                hls_config=hls_config_dict
             )
 
             if cmd:

@@ -157,7 +157,7 @@ class StreamProfile(models.Model):
         """Check if this profile outputs MPEG-TS format."""
         return self.profile_type == PROFILE_TYPE_TS
 
-    def build_command(self, stream_url, user_agent, hls_output_path=None):
+    def build_command(self, stream_url, user_agent, hls_output_path=None, hls_config=None):
         """
         Build the command for this stream profile.
 
@@ -165,6 +165,7 @@ class StreamProfile(models.Model):
             stream_url: The stream URL to process
             user_agent: The user agent string
             hls_output_path: Path to HLS output directory (required for HLS profiles)
+            hls_config: Dict with HLS settings (segment_duration, playlist_size, etc.)
 
         Returns:
             List of command arguments, or empty list for proxy profiles
@@ -180,6 +181,11 @@ class StreamProfile(models.Model):
         # Add HLS output path if provided (for HLS profiles)
         if hls_output_path:
             replacements["{hlsOutputPath}"] = hls_output_path
+
+        # Add HLS config placeholders if provided
+        if hls_config:
+            replacements["{segmentDuration}"] = str(hls_config.get("segment_duration", 6))
+            replacements["{playlistSize}"] = str(hls_config.get("playlist_size", 5))
 
         # Split the command and iterate through each part to apply replacements
         cmd = [self.command] + [
