@@ -82,15 +82,19 @@ def hls_master_playlist(request, channel_uuid: str):
     if not session:
         return HttpResponse("Failed to start HLS output", status=500)
 
-    # Wait for playlist AND at least one segment to be created (up to 10 seconds)
-    # This prevents serving a playlist that references non-existent segments
+    # Wait for playlist AND enough segments to be created (up to 15 seconds)
+    # With delete_segments enabled, FFmpeg may run faster than real-time and delete
+    # early segments before clients can request them. We need to wait for enough
+    # segments to exist that the oldest one in the playlist is available.
+    # With hls_list_size=10 and 2-second segments, we need at least 3-4 segments
+    # to give clients time to start playback before segment_00000 gets deleted.
+    MIN_SEGMENTS_BEFORE_READY = 3
     playlist_ready = False
-    for _ in range(100):  # 10 seconds
+    for _ in range(150):  # 15 seconds
         if session.playlist_exists:
-            # Also check that at least one segment exists
             segment_pattern = os.path.join(session.output_path, "segment_*.ts")
             segments = glob.glob(segment_pattern)
-            if segments:
+            if len(segments) >= MIN_SEGMENTS_BEFORE_READY:
                 playlist_ready = True
                 break
         time.sleep(0.1)

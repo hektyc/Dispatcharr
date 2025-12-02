@@ -809,6 +809,10 @@ class HLSClientManager:
 
         This allows any worker to stop an FFmpeg process started by another worker.
         After killing the process, cleans up files and Redis keys.
+
+        IMPORTANT: We mark the channel inactive FIRST, before killing the process.
+        This prevents the FFmpeg monitor thread from seeing "process exited unexpectedly"
+        and trying to auto-switch to a backup stream while we're cleaning up.
         """
         import os
         import signal
@@ -817,8 +821,14 @@ class HLSClientManager:
         from .config import hls_config
 
         try:
-            # Get PID from Redis
+            # Get PID from Redis BEFORE marking channel inactive
+            # (set_channel_inactive deletes the metadata hash including the PID)
             pid_str = self.redis_client.hget(metadata_key, "pid")
+
+            # CRITICAL: Mark channel inactive BEFORE killing the process
+            # This prevents the manager's FFmpeg monitor thread from seeing the exit
+            # and trying to auto-switch to a backup stream (race condition fix)
+            self.set_channel_inactive(channel_uuid)
 
             if pid_str:
                 pid = int(pid_str)
@@ -874,8 +884,8 @@ class HLSClientManager:
                 except Exception as e:
                     logger.error(f"Error cleaning up HLS directory {channel_path}: {e}")
 
-            # Clean up Redis keys
-            self.set_channel_inactive(channel_uuid)
+            # Note: set_channel_inactive was already called at the start of this method
+            # to prevent race conditions with the FFmpeg monitor thread
 
             logger.info(f"HLS session stopped for channel {channel_uuid}")
 
