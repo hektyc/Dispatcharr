@@ -23,10 +23,17 @@ urlpatterns = [
         name="master_playlist"
     ),
     # Media playlist: /output/hls/{channel_uuid}/index.m3u8
+    # Also accepts stream.m3u8 for backwards compatibility
     re_path(
         r"^(?P<channel_uuid>[0-9a-fA-F\-]+)/index\.m3u8$",
         views.hls_media_playlist,
         name="media_playlist"
+    ),
+    # Backwards compatibility: /output/hls/{channel_uuid}/stream.m3u8
+    re_path(
+        r"^(?P<channel_uuid>[0-9a-fA-F\-]+)/stream\.m3u8$",
+        views.hls_media_playlist,
+        name="media_playlist_legacy"
     ),
     # Segments: /output/hls/{channel_uuid}/{segment_name}
     # Format: index0.ts, index1.ts, etc. (no leading zeros, supports unlimited segments)

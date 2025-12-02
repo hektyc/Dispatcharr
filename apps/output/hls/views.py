@@ -82,17 +82,29 @@ def hls_master_playlist(request, channel_uuid: str):
     if not session:
         return HttpResponse("Failed to start HLS output", status=500)
 
+    # Track client connection IMMEDIATELY - before the wait loop
+    # This is critical to prevent the session from being killed by the client manager
+    # while we're waiting for FFmpeg to create segments
+    client_id = _get_client_id(request)
+    client_ip = _get_client_ip(request)
+    client_user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown')
+    hls_client_manager.add_client(channel_uuid, client_id, client_ip, client_user_agent)
+
     # Wait for playlist AND enough segments to be created (up to 15 seconds)
     # With delete_segments enabled, FFmpeg may run faster than real-time and delete
     # early segments before clients can request them. We need to wait for enough
     # segments to exist that the oldest one in the playlist is available.
     # With hls_list_size=10 and 2-second segments, we need at least 3-4 segments
-    # to give clients time to start playback before segment_00000 gets deleted.
+    # to give clients time to start playback before index0.ts gets deleted.
     MIN_SEGMENTS_BEFORE_READY = 3
     playlist_ready = False
     for _ in range(150):  # 15 seconds
+        # Update client activity during the wait to keep session alive
+        hls_client_manager.update_client_activity(channel_uuid, client_id)
+
         if session.playlist_exists:
-            segment_pattern = os.path.join(session.output_path, "segment_*.ts")
+            # Segment format: index0.ts, index1.ts, etc.
+            segment_pattern = os.path.join(session.output_path, "index*.ts")
             segments = glob.glob(segment_pattern)
             if len(segments) >= MIN_SEGMENTS_BEFORE_READY:
                 playlist_ready = True
@@ -101,12 +113,6 @@ def hls_master_playlist(request, channel_uuid: str):
 
     if not playlist_ready:
         return HttpResponse("HLS stream not ready yet, try again", status=503)
-
-    # Track client connection
-    client_id = _get_client_id(request)
-    client_ip = _get_client_ip(request)
-    client_user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown')
-    hls_client_manager.add_client(channel_uuid, client_id, client_ip, client_user_agent)
 
     # Return redirect to the media playlist
     # For simplicity, we serve a master playlist that points to the stream playlist
