@@ -969,7 +969,7 @@ class HLSChannelSession:
     @property
     def playlist_path(self):
         """Get the path to the HLS playlist file."""
-        return os.path.join(self.output_path, "stream.m3u8")
+        return os.path.join(self.output_path, "index.m3u8")
 
     @property
     def playlist_exists(self):
