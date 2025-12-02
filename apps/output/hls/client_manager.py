@@ -29,7 +29,7 @@ class HLSClientManager:
     # CLIENT_TTL should be slightly longer than segment duration to survive between requests
     # HLS clients typically request segments every segment_duration seconds
     # We use a small fixed buffer since the shutdown_delay setting controls actual cleanup timing
-    CLIENT_TTL_BUFFER = 3  # Seconds buffer on top of segment_duration for CLIENT_TTL
+    CLIENT_TTL_BUFFER = 2  # Seconds buffer on top of segment_duration for CLIENT_TTL
     HEARTBEAT_INTERVAL = 5  # Seconds between heartbeat updates
     CLEANUP_CHECK_INTERVAL = 1  # Seconds between cleanup checks (fast for quick response)
     DEFAULT_INACTIVITY_TIMEOUT = 5  # Fallback if database setting unavailable
@@ -123,11 +123,22 @@ class HLSClientManager:
         HLS clients request segments every segment_duration seconds, so we use:
         segment_duration + a small buffer.
 
-        The actual cleanup timing is controlled by shutdown_delay setting.
+        IMPORTANT: For instant TTL to work, this should be as short as possible
+        while still allowing clients to survive between segment requests.
+        The shutdown_delay timer only starts AFTER client keys expire.
+
+        Total time before shutdown = client_ttl + shutdown_delay
+
+        For a 3-second shutdown_delay with 6-second segments:
+        - client_ttl = 6 + 2 = 8 seconds
+        - Total = 8 + 3 = 11 seconds after last request
+
+        To minimize this, we use segment_duration + 1 second buffer.
         """
         from apps.output.hls.config import hls_config
         segment_duration = hls_config.segment_duration or 6
-        return segment_duration + self.CLIENT_TTL_BUFFER
+        # Use minimal buffer (1 second) for faster TTL response
+        return segment_duration + 1
 
     def add_client(self, channel_uuid: str, client_id: str, client_ip: str,
                    user_agent: str = None) -> bool:

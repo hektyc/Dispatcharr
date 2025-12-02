@@ -21,7 +21,7 @@ from apps.channels.models import Channel, Stream
 from apps.m3u.models import M3UAccountProfile
 from apps.accounts.permissions import IsAdmin
 from dispatcharr.utils import network_access_allowed
-from .manager import hls_manager, get_direct_stream_url
+from .manager import hls_manager, get_direct_stream_url, get_direct_stream_url_for_stream, get_channel_or_stream
 from .config import hls_config
 from .client_manager import hls_client_manager
 
@@ -53,31 +53,52 @@ def _get_client_ip(request):
 @require_http_methods(["GET", "HEAD"])
 def hls_master_playlist(request, channel_uuid: str):
     """
-    Serve the HLS master playlist for a channel.
+    Serve the HLS master playlist for a channel or stream.
     This is the entry point for HLS playback.
     URL: /output/hls/{channel_uuid}/playlist.m3u8
+
+    Supports both:
+    - Channel UUIDs (e.g., 378f9af6-d623-4384-8b2a-3a69d1746768)
+    - Stream hashes (e.g., abc123def456)
     """
     if not network_access_allowed(request, "STREAMS"):
         return HttpResponse("Forbidden", status=403)
 
-    # Verify channel exists
-    try:
-        channel = Channel.objects.get(uuid=channel_uuid)
-    except Channel.DoesNotExist:
-        return HttpResponseNotFound("Channel not found")
+    # Get channel or stream by UUID or hash
+    channel_or_stream, session_id = get_channel_or_stream(channel_uuid)
 
-    # Get direct stream URL (bypasses TS proxy to avoid circular dependency)
-    stream_url, user_agent = get_direct_stream_url(channel)
-    if not stream_url:
-        return HttpResponse("No stream available for this channel", status=503)
+    if channel_or_stream is None:
+        return HttpResponseNotFound("Channel or stream not found")
 
-    # Get or start HLS session with direct stream URL
-    session = hls_manager.get_or_start_session(
-        channel_uuid,
-        stream_url,
-        user_agent=user_agent,
-        channel=channel
-    )
+    # Get direct stream URL based on object type
+    if isinstance(channel_or_stream, Channel):
+        # It's a channel - use the channel's stream selection logic
+        channel = channel_or_stream
+        stream_url, user_agent = get_direct_stream_url(channel)
+        if not stream_url:
+            return HttpResponse("No stream available for this channel", status=503)
+
+        # Get or start HLS session with direct stream URL
+        session = hls_manager.get_or_start_session(
+            session_id,
+            stream_url,
+            user_agent=user_agent,
+            channel=channel
+        )
+    else:
+        # It's a stream - preview directly from source
+        stream = channel_or_stream
+        stream_url, user_agent = get_direct_stream_url_for_stream(stream)
+        if not stream_url:
+            return HttpResponse("No stream URL available", status=503)
+
+        # Get or start HLS session for stream preview (no channel object)
+        session = hls_manager.get_or_start_session(
+            session_id,
+            stream_url,
+            user_agent=user_agent,
+            channel=None  # No channel for stream preview
+        )
 
     if not session:
         return HttpResponse("Failed to start HLS output", status=500)
@@ -88,7 +109,7 @@ def hls_master_playlist(request, channel_uuid: str):
     client_id = _get_client_id(request)
     client_ip = _get_client_ip(request)
     client_user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown')
-    hls_client_manager.add_client(channel_uuid, client_id, client_ip, client_user_agent)
+    hls_client_manager.add_client(session_id, client_id, client_ip, client_user_agent)
 
     # Wait for playlist, enough segments, AND FFmpeg speed to stabilize (up to 20 seconds)
     # With delete_segments enabled, FFmpeg may run faster than real-time and delete
@@ -103,7 +124,7 @@ def hls_master_playlist(request, channel_uuid: str):
 
     for _ in range(200):  # 20 seconds (increased from 15 to allow speed stabilization)
         # Update client activity during the wait to keep session alive
-        hls_client_manager.update_client_activity(channel_uuid, client_id)
+        hls_client_manager.update_client_activity(session_id, client_id)
 
         if session.playlist_exists:
             # Segment format: index0.ts, index1.ts, etc.
@@ -123,7 +144,7 @@ def hls_master_playlist(request, channel_uuid: str):
                     speed_stabilized = True
                     playlist_ready = True
                     logger.debug(
-                        f"HLS {channel_uuid}: Ready with {len(segments)} segments, "
+                        f"HLS {session_id}: Ready with {len(segments)} segments, "
                         f"speed={current_speed:.2f}x"
                     )
                     break
@@ -142,19 +163,19 @@ def hls_master_playlist(request, channel_uuid: str):
     if not speed_stabilized:
         # Log warning but continue - better to serve something than nothing
         logger.warning(
-            f"HLS {channel_uuid}: Serving playlist before speed stabilization "
+            f"HLS {session_id}: Serving playlist before speed stabilization "
             f"(may cause initial skipping)"
         )
 
     # Return redirect to the media playlist
     # For simplicity, we serve a master playlist that points to the stream playlist
     base_url = request.build_absolute_uri('/')[:-1]
-    stream_url = f"{base_url}/output/hls/{channel_uuid}/index.m3u8"
+    hls_url = f"{base_url}/output/hls/{session_id}/index.m3u8"
 
     master_content = f"""#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-STREAM-INF:BANDWIDTH=5000000
-{stream_url}
+{hls_url}
 """
 
     response = HttpResponse(master_content, content_type="application/vnd.apple.mpegurl")

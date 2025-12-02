@@ -254,6 +254,7 @@ const StreamsTable = () => {
       state.channels.find((chan) => chan.id === selectedChannelIds[0])?.streams
   );
   const env_mode = useSettingsStore((s) => s.environment.env_mode);
+  const streamFormat = useSettingsStore((s) => s.streamFormat);
   const showVideo = useVideoStore((s) => s.showVideo);
   const [tableSize, _] = useLocalStorage('table-size', 'default');
 
@@ -681,11 +682,19 @@ const StreamsTable = () => {
   };
 
   function handleWatchStream(streamHash) {
-    let vidUrl = `/proxy/ts/stream/${streamHash}`;
+    // Stream preview uses the same output format as channels (TS or HLS)
+    // HLS output now supports stream hashes, not just channel UUIDs
+    let vidUrl;
+    if (streamFormat === 'hls') {
+      vidUrl = `/output/hls/${streamHash}/playlist.m3u8`;
+    } else {
+      vidUrl = `/proxy/ts/stream/${streamHash}`;
+    }
     if (env_mode == 'dev') {
       vidUrl = `${window.location.protocol}//${window.location.hostname}:5656${vidUrl}`;
     }
-    showVideo(vidUrl);
+    // Pass format hint to video player
+    showVideo(vidUrl, 'live', null, streamFormat);
   }
 
   const onSortingChange = (column) => {

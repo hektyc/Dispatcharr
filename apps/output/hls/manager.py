@@ -16,6 +16,92 @@ from .client_manager import hls_client_manager
 logger = logging.getLogger(__name__)
 
 
+def get_channel_or_stream(identifier: str):
+    """
+    Get a Channel or Stream object by UUID or stream_hash.
+
+    This mirrors the TS proxy's get_stream_object function to provide
+    consistent behavior when previewing streams vs channels.
+
+    Args:
+        identifier: Channel UUID or Stream hash
+
+    Returns:
+        Tuple[Channel|Stream|None, str|None]: (object, identifier_to_use)
+        For channels, identifier_to_use is the channel UUID
+        For streams, identifier_to_use is the stream_hash
+    """
+    from apps.channels.models import Channel, Stream
+
+    # Try as channel UUID first
+    try:
+        channel = Channel.objects.get(uuid=identifier)
+        logger.debug(f"HLS: Found channel by UUID: {identifier}")
+        return channel, str(channel.uuid)
+    except Channel.DoesNotExist:
+        pass
+    except Exception as e:
+        logger.debug(f"HLS: Error looking up channel {identifier}: {e}")
+
+    # Try as stream hash
+    try:
+        stream = Stream.objects.get(stream_hash=identifier)
+        logger.debug(f"HLS: Found stream by hash: {identifier}")
+        return stream, stream.stream_hash
+    except Stream.DoesNotExist:
+        pass
+    except Exception as e:
+        logger.debug(f"HLS: Error looking up stream {identifier}: {e}")
+
+    logger.warning(f"HLS: No channel or stream found for identifier: {identifier}")
+    return None, None
+
+
+def get_direct_stream_url_for_stream(stream) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Get the direct stream URL and user agent for a Stream object.
+
+    Args:
+        stream: Stream model instance
+
+    Returns:
+        Tuple[stream_url, user_agent]: The direct stream URL and user agent
+    """
+    try:
+        from apps.proxy.ts_proxy.url_utils import transform_url
+
+        m3u_account = stream.m3u_account
+        if not m3u_account:
+            logger.error(f"Stream {stream.id} has no M3U account")
+            return None, None
+
+        # Get active default profile
+        m3u_profiles = m3u_account.profiles.filter(is_active=True)
+        m3u_profile = next((p for p in m3u_profiles if p.is_default), None)
+
+        if not m3u_profile:
+            # Fall back to any active profile
+            m3u_profile = m3u_profiles.first()
+
+        if not m3u_profile:
+            logger.error(f"No active profile for M3U account {m3u_account.id}")
+            return None, None
+
+        user_agent = m3u_account.get_user_agent().user_agent
+        stream_url = transform_url(
+            stream.url,
+            m3u_profile.search_pattern,
+            m3u_profile.replace_pattern
+        )
+
+        logger.debug(f"Got direct stream URL for stream {stream.stream_hash}: {stream_url[:50]}...")
+        return stream_url, user_agent
+
+    except Exception as e:
+        logger.error(f"Error getting direct stream URL for stream: {e}")
+        return None, None
+
+
 def get_direct_stream_url(channel) -> Tuple[Optional[str], Optional[str]]:
     """
     Get the direct stream URL and user agent for a channel.
@@ -467,6 +553,10 @@ class HLSChannelSession:
             # Input options - must come before -i
             # Note: No reconnect flags - Dispatcharr core handles reconnection
             "-user_agent", user_agent,
+            # Input buffer to handle source instability (prevents short freezes)
+            "-fflags", "+genpts+discardcorrupt",
+            "-analyzeduration", "5000000",  # 5 seconds to analyze input
+            "-probesize", "5000000",  # 5MB probe size
             "-i", self.stream_url,
             # Output options
             "-c", "copy",  # Copy without re-encoding
@@ -474,7 +564,7 @@ class HLSChannelSession:
             "-hls_time", str(segment_duration),
             "-hls_list_size", str(playlist_size),
             "-hls_flags", hls_flags,
-            "-hls_delete_threshold", "10",  # Keep 10 extra segments before deletion (smoother startup playback)
+            "-hls_delete_threshold", "3",  # Keep 3 extra segments before deletion
             "-hls_segment_filename", segment_pattern,
         ]
 
