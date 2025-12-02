@@ -22,15 +22,16 @@ urlpatterns = [
         views.hls_master_playlist,
         name="master_playlist"
     ),
-    # Media playlist: /output/hls/{channel_uuid}/stream.m3u8
+    # Media playlist: /output/hls/{channel_uuid}/index.m3u8
     re_path(
-        r"^(?P<channel_uuid>[0-9a-fA-F\-]+)/stream\.m3u8$",
+        r"^(?P<channel_uuid>[0-9a-fA-F\-]+)/index\.m3u8$",
         views.hls_media_playlist,
         name="media_playlist"
     ),
     # Segments: /output/hls/{channel_uuid}/{segment_name}
+    # Format: index0.ts, index1.ts, etc. (no leading zeros, supports unlimited segments)
     re_path(
-        r"^(?P<channel_uuid>[0-9a-fA-F\-]+)/(?P<segment_name>segment_[0-9]+\.(ts|m4s))$",
+        r"^(?P<channel_uuid>[0-9a-fA-F\-]+)/(?P<segment_name>index[0-9]+\.(ts|m4s))$",
         views.hls_segment,
         name="segment"
     ),

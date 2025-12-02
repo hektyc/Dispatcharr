@@ -445,8 +445,10 @@ class HLSChannelSession:
 
         logger.info(f"HLS {self.channel_uuid}: Building FFmpeg command with segment_duration={segment_duration}, playlist_size={playlist_size}, ll_hls={ll_hls_enabled}")
 
-        playlist_path = os.path.join(self.output_path, "stream.m3u8")
-        segment_pattern = os.path.join(self.output_path, "segment_%05d.ts")
+        playlist_path = os.path.join(self.output_path, "index.m3u8")
+        # Use %d instead of %05d to allow unlimited segment numbers (no 5-digit limit)
+        # This supports indefinite streaming without segment number overflow
+        segment_pattern = os.path.join(self.output_path, "index%d.ts")
         user_agent = self._get_user_agent()
 
         # Build HLS flags

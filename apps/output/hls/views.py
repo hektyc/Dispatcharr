@@ -111,7 +111,7 @@ def hls_master_playlist(request, channel_uuid: str):
     # Return redirect to the media playlist
     # For simplicity, we serve a master playlist that points to the stream playlist
     base_url = request.build_absolute_uri('/')[:-1]
-    stream_url = f"{base_url}/output/hls/{channel_uuid}/stream.m3u8"
+    stream_url = f"{base_url}/output/hls/{channel_uuid}/index.m3u8"
 
     master_content = f"""#EXTM3U
 #EXT-X-VERSION:3
@@ -129,8 +129,8 @@ def hls_master_playlist(request, channel_uuid: str):
 @require_http_methods(["GET", "HEAD"])
 def hls_media_playlist(request, channel_uuid: str):
     """
-    Serve the HLS media playlist (stream.m3u8) for a channel.
-    URL: /output/hls/{channel_uuid}/stream.m3u8
+    Serve the HLS media playlist (index.m3u8) for a channel.
+    URL: /output/hls/{channel_uuid}/index.m3u8
 
     Note: In a multi-worker uwsgi environment, sessions are not shared between
     workers. Instead of checking session state, we check if the playlist file
@@ -143,7 +143,7 @@ def hls_media_playlist(request, channel_uuid: str):
     # Get the playlist path from config (don't rely on session state)
     playlist_path = os.path.join(
         hls_config.get_channel_path(channel_uuid),
-        "stream.m3u8"
+        "index.m3u8"
     )
 
     # Update client activity BEFORE checking if playlist exists
@@ -165,12 +165,14 @@ def hls_media_playlist(request, channel_uuid: str):
             content = f.read()
 
         # Replace segment filenames with absolute URLs
+        # Segment format: index0.ts, index1.ts, etc.
         base_url = request.build_absolute_uri('/')[:-1]
         segment_base = f"{base_url}/output/hls/{channel_uuid}/"
 
         modified_lines = []
         for line in content.splitlines():
-            if line.startswith("segment_"):
+            # Match segment files: index0.ts, index1.ts, etc. (or .m4s for fmp4)
+            if line.startswith("index") and (line.endswith(".ts") or line.endswith(".m4s")):
                 modified_lines.append(segment_base + line)
             else:
                 modified_lines.append(line)
