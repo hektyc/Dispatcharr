@@ -450,7 +450,10 @@ class HLSChannelSession:
         user_agent = self._get_user_agent()
 
         # Build HLS flags
-        hls_flags = "delete_segments+append_list"
+        # - delete_segments: Remove old segments from disk
+        # - append_list: Append to playlist instead of overwriting
+        # - program_date_time: Add EXT-X-PROGRAM-DATE-TIME for better player sync
+        hls_flags = "delete_segments+append_list+program_date_time"
         if ll_hls_enabled:
             # LL-HLS requires additional flags for lower latency
             hls_flags += "+independent_segments"
@@ -469,6 +472,7 @@ class HLSChannelSession:
             "-hls_time", str(segment_duration),
             "-hls_list_size", str(playlist_size),
             "-hls_flags", hls_flags,
+            "-hls_delete_threshold", "3",  # Keep 3 extra segments before deletion (smoother playback)
             "-hls_segment_filename", segment_pattern,
         ]
 
