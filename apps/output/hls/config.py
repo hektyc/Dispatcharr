@@ -86,6 +86,9 @@ class HLSConfig:
         Returns True if directory exists and is writable, False otherwise.
         Does not raise exceptions - logs errors instead.
 
+        Handles race conditions during stream switching by retrying if the
+        directory temporarily doesn't exist (ENOENT errors).
+
         For ramdisk/tmpfs mounts, users should either:
         1. Use Docker's native tmpfs mount (recommended):
            volumes:
@@ -98,55 +101,77 @@ class HLSConfig:
            volumes:
              - /mnt/user/ramdisk:/data/hls:rw
 
-           And ensure the host directory is writable by the container user:
+           And ensure the host directory is writable by container user:
            chown -R $PUID:$PGID /mnt/user/ramdisk
         """
-        try:
-            if not os.path.exists(path):
-                os.makedirs(path, mode=0o755, exist_ok=True)
-                logger.info(f"Created HLS output directory: {path}")
+        import errno
+        import time
+        max_retries = 3
+        retry_delay = 0.1  # 100ms
 
-            # Verify we can write to the directory
-            test_file = os.path.join(path, ".hls_write_test")
+        for attempt in range(max_retries):
             try:
-                with open(test_file, "w") as f:
-                    f.write("test")
-                os.remove(test_file)
-                logger.debug(f"HLS output directory verified writable: {path}")
-                return True
-            except (IOError, OSError) as e:
-                # Get current user info for helpful error message
-                import pwd
-                try:
-                    current_user = pwd.getpwuid(os.getuid())
-                    user_info = f"uid={current_user.pw_uid}, gid={current_user.pw_gid}"
-                except:
-                    user_info = f"uid={os.getuid()}"
+                # Create directory if it doesn't exist
+                os.makedirs(path, mode=0o755, exist_ok=True)
 
-                # Check directory ownership
+                # Verify we can write to the directory
+                test_file = os.path.join(path, ".hls_write_test")
                 try:
-                    dir_stat = os.stat(path)
-                    dir_info = f"dir owner uid={dir_stat.st_uid}, gid={dir_stat.st_gid}"
-                except:
-                    dir_info = "could not stat directory"
+                    with open(test_file, "w") as f:
+                        f.write("test")
+                    os.remove(test_file)
+                    logger.debug(f"HLS output directory verified writable: {path}")
+                    return True
+                except FileNotFoundError as e:
+                    # Directory was deleted between makedirs and write test (race condition)
+                    # This can happen during stream switching - retry
+                    if attempt < max_retries - 1:
+                        logger.debug(f"HLS directory {path} disappeared during write test, retrying...")
+                        time.sleep(retry_delay)
+                        continue
+                    # Fall through to error handling on last attempt
+                    raise
+                except (IOError, OSError) as e:
+                    # Check if this is a "No such file or directory" error (race condition)
+                    if hasattr(e, 'errno') and e.errno == errno.ENOENT:
+                        if attempt < max_retries - 1:
+                            logger.debug(f"HLS directory {path} race condition detected, retrying...")
+                            time.sleep(retry_delay)
+                            continue
+                    # Get current user info for helpful error message
+                    import pwd
+                    try:
+                        current_user = pwd.getpwuid(os.getuid())
+                        user_info = f"uid={current_user.pw_uid}, gid={current_user.pw_gid}"
+                    except:
+                        user_info = f"uid={os.getuid()}"
 
+                    # Check directory ownership
+                    try:
+                        dir_stat = os.stat(path)
+                        dir_info = f"dir owner uid={dir_stat.st_uid}, gid={dir_stat.st_gid}"
+                    except:
+                        dir_info = "could not stat directory"
+
+                    logger.error(
+                        f"HLS output directory {path} is not writable: {e}. "
+                        f"Container user: {user_info}. Directory: {dir_info}. "
+                        f"Fix: Either use Docker tmpfs mount, or run 'chown -R $PUID:$PGID {path}' on the host."
+                    )
+                    return False
+            except PermissionError as e:
                 logger.error(
-                    f"HLS output directory {path} is not writable: {e}. "
-                    f"Container user: {user_info}. Directory: {dir_info}. "
-                    f"Fix: Either use Docker tmpfs mount, or run 'chown -R $PUID:$PGID {path}' on the host."
+                    f"Permission denied creating HLS directory {path}: {e}. "
+                    f"For ramdisk/tmpfs, use Docker's native tmpfs mount: "
+                    f"volumes: [{{type: tmpfs, target: /data/hls, tmpfs: {{size: 1073741824}}}}] "
+                    f"or ensure host directory is writable by container user (PUID/PGID)."
                 )
                 return False
-        except PermissionError as e:
-            logger.error(
-                f"Permission denied creating HLS directory {path}: {e}. "
-                f"For ramdisk/tmpfs, use Docker's native tmpfs mount: "
-                f"volumes: [{{type: tmpfs, target: /data/hls, tmpfs: {{size: 1073741824}}}}] "
-                f"or ensure host directory is writable by container user (PUID/PGID)."
-            )
-            return False
-        except Exception as e:
-            logger.error(f"Failed to create/verify HLS output directory {path}: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"Failed to create/verify HLS output directory {path}: {e}")
+                return False
+
+        return False  # Should not reach here, but safety fallback
 
     @property
     def segment_duration(self):
