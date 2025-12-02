@@ -128,6 +128,16 @@ class HLSChannelSession:
         self._monitor_thread: Optional[threading.Thread] = None
         self._stream_profile = None  # Cache the stream profile
         self._ffmpeg_input_phase = True  # Track if we're parsing input info (before output phase)
+        # Track tried streams for automatic failover
+        self._tried_stream_ids: set = set()
+        self._current_stream_id: Optional[int] = None
+        # Extract current stream ID from metadata if available
+        if stream_metadata and 'stream_id' in stream_metadata:
+            try:
+                self._current_stream_id = int(stream_metadata['stream_id'])
+                self._tried_stream_ids.add(self._current_stream_id)
+            except (ValueError, TypeError):
+                pass
 
     @property
     def output_path(self):
@@ -495,10 +505,18 @@ class HLSChannelSession:
                 if not self._stop_event.is_set():
                     logger.error(f"FFmpeg for {self.channel_uuid} exited unexpectedly")
                     self.is_running = False
-                    # Cleanup segments when process exits unexpectedly
-                    self._cleanup_all()
-                    # Release ownership so another worker can take over if needed
-                    hls_manager._release_ownership(self.channel_uuid)
+
+                    # Try to switch to a backup stream automatically
+                    if self._try_automatic_stream_switch():
+                        logger.info(f"HLS {self.channel_uuid}: Automatic stream switch successful")
+                        # Don't break - the new session will have its own monitor
+                        return
+                    else:
+                        logger.warning(f"HLS {self.channel_uuid}: No backup streams available, cleaning up")
+                        # Cleanup segments when process exits unexpectedly and no backup available
+                        self._cleanup_all()
+                        # Release ownership so another worker can take over if needed
+                        hls_manager._release_ownership(self.channel_uuid)
                 break
 
             # Refresh ownership periodically to prevent TTL expiry
@@ -817,6 +835,121 @@ class HLSChannelSession:
                 logger.info(f"Cleaned up HLS directory for {self.channel_uuid}: {self.output_path}")
         except Exception as e:
             logger.error(f"Failed to cleanup HLS directory for {self.channel_uuid}: {e}")
+
+    def _try_automatic_stream_switch(self) -> bool:
+        """
+        Try to automatically switch to a backup stream when the current stream fails.
+
+        This mirrors the TS Proxy's automatic stream switching behavior.
+        Creates a new session directly since the current session's FFmpeg has exited.
+
+        Returns:
+            bool: True if successfully switched to a new stream, False otherwise
+        """
+        try:
+            from apps.proxy.ts_proxy.url_utils import get_alternate_streams, get_stream_info_for_switch
+            from apps.channels.models import Channel
+
+            logger.info(f"HLS {self.channel_uuid}: Attempting automatic stream switch, "
+                       f"current stream ID: {self._current_stream_id}, tried: {self._tried_stream_ids}")
+
+            # Get alternate streams excluding ones we've already tried
+            alternate_streams = get_alternate_streams(self.channel_uuid, self._current_stream_id)
+
+            if not alternate_streams:
+                logger.warning(f"HLS {self.channel_uuid}: No alternate streams available")
+                return False
+
+            # Filter out streams we've already tried
+            untried_streams = [s for s in alternate_streams if s['stream_id'] not in self._tried_stream_ids]
+
+            if not untried_streams:
+                logger.warning(f"HLS {self.channel_uuid}: All {len(alternate_streams)} alternate streams "
+                              f"have been tried: {self._tried_stream_ids}")
+                return False
+
+            logger.info(f"HLS {self.channel_uuid}: Found {len(untried_streams)} untried backup streams")
+
+            # Get channel object
+            try:
+                channel = Channel.objects.get(uuid=self.channel_uuid)
+            except Channel.DoesNotExist:
+                logger.error(f"HLS {self.channel_uuid}: Channel not found in database")
+                return False
+
+            # Try each untried stream
+            for next_stream in untried_streams:
+                stream_id = next_stream['stream_id']
+                profile_id = next_stream['profile_id']
+
+                # Mark as tried
+                self._tried_stream_ids.add(stream_id)
+
+                # Get stream info including URL
+                logger.info(f"HLS {self.channel_uuid}: Trying backup stream ID {stream_id} "
+                           f"with profile ID {profile_id}")
+                stream_info = get_stream_info_for_switch(self.channel_uuid, stream_id)
+
+                if 'error' in stream_info or not stream_info.get('url'):
+                    logger.error(f"HLS {self.channel_uuid}: Error getting info for stream {stream_id}: "
+                                f"{stream_info.get('error', 'No URL')}")
+                    continue
+
+                new_url = stream_info['url']
+                new_user_agent = stream_info.get('user_agent')
+
+                # Build new stream metadata
+                new_metadata = {
+                    'stream_id': str(stream_id),
+                    'm3u_profile_id': str(profile_id),
+                }
+                if 'stream_name' in stream_info:
+                    new_metadata['stream_name'] = stream_info['stream_name']
+
+                # Get HLS profile info
+                hls_profile = channel.get_hls_stream_profile()
+                if hls_profile:
+                    new_metadata['stream_profile'] = str(hls_profile.id)
+                    new_metadata['stream_profile_name'] = hls_profile.name
+
+                # Create a new session directly (don't use change_stream_url since current session is dead)
+                new_session = HLSChannelSession(
+                    channel_uuid=self.channel_uuid,
+                    stream_url=new_url,
+                    user_agent=new_user_agent,
+                    channel=channel,
+                    stream_metadata=new_metadata
+                )
+
+                # Copy tried streams to new session so it knows what we've already tried
+                new_session._tried_stream_ids = self._tried_stream_ids.copy()
+                new_session._current_stream_id = stream_id
+
+                # Try to start the new session
+                if new_session.start():
+                    # Replace the old session in the manager
+                    with hls_manager._sessions_lock:
+                        hls_manager._sessions[self.channel_uuid] = new_session
+
+                    # Update Redis metadata
+                    hls_client_manager.update_channel_metadata(
+                        self.channel_uuid,
+                        new_url,
+                        new_metadata
+                    )
+
+                    logger.info(f"HLS {self.channel_uuid}: Automatic switch to stream {stream_id} successful")
+                    return True
+                else:
+                    logger.warning(f"HLS {self.channel_uuid}: Failed to start session for stream {stream_id}")
+                    continue
+
+            logger.error(f"HLS {self.channel_uuid}: Tried all {len(untried_streams)} backup streams, none worked")
+            return False
+
+        except Exception as e:
+            logger.error(f"HLS {self.channel_uuid}: Error during automatic stream switch: {e}", exc_info=True)
+            return False
 
     @property
     def playlist_path(self):
