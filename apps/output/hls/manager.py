@@ -292,12 +292,19 @@ class HLSChannelSession:
             self.is_running = False
             return False
 
-    def stop(self):
-        """Stop the FFmpeg process and cleanup."""
+    def stop(self, cleanup: bool = True, release_ownership: bool = True):
+        """Stop the FFmpeg process and optionally cleanup.
+
+        Args:
+            cleanup: If True (default), cleanup HLS files based on retention settings.
+                    If False, keep the HLS directory for session restart/switching.
+            release_ownership: If True (default), release channel ownership in Redis.
+                              If False, keep ownership for immediate session restart.
+        """
         if not self.is_running:
             return
 
-        logger.info(f"Stopping HLS output for {self.channel_uuid}")
+        logger.info(f"Stopping HLS output for {self.channel_uuid} (cleanup={cleanup})")
         self._stop_event.set()
 
         if self.process:
@@ -314,20 +321,22 @@ class HLSChannelSession:
 
         self.is_running = False
 
-        # Notify client manager that channel is inactive
-        hls_client_manager.set_channel_inactive(self.channel_uuid)
+        if cleanup:
+            # Notify client manager that channel is inactive
+            hls_client_manager.set_channel_inactive(self.channel_uuid)
 
-        # Release ownership so other workers know this channel is stopped
-        hls_manager._release_ownership(self.channel_uuid)
+            # Cleanup based on retention settings
+            # Use _cleanup_all() to remove both files AND directory
+            retention = hls_config.retention_seconds
+            if retention == 0:
+                self._cleanup_all()
+            else:
+                # Schedule delayed cleanup
+                threading.Timer(retention, self._cleanup_all).start()
 
-        # Cleanup based on retention settings
-        # Use _cleanup_all() to remove both files AND directory
-        retention = hls_config.retention_seconds
-        if retention == 0:
-            self._cleanup_all()
-        else:
-            # Schedule delayed cleanup
-            threading.Timer(retention, self._cleanup_all).start()
+        if release_ownership:
+            # Release ownership so other workers know this channel is stopped
+            hls_manager._release_ownership(self.channel_uuid)
 
     def _is_source_hls(self):
         """Check if the source URL is an HLS stream (ends with .m3u8)."""
@@ -1232,16 +1241,19 @@ class HLSOutputManager:
                 stream_metadata['stream_profile_name'] = hls_profile.name
 
             old_url = session.stream_url
+            old_user_agent = session.user_agent_override
+            old_stream_metadata = session.stream_metadata
             logger.info(f"HLS {channel_uuid}: Switching stream from {old_url[:50]}... to {new_url[:50]}...")
 
-            # Stop the current session
-            session.stop()
+            # Stop the current session WITHOUT cleanup and WITHOUT releasing ownership
+            # We want to keep the HLS directory intact for the new session
+            session.stop(cleanup=False, release_ownership=False)
 
             # Create new session with new URL
             new_session = HLSChannelSession(
                 channel_uuid=channel_uuid,
                 stream_url=new_url,
-                user_agent=user_agent,
+                user_agent=user_agent or old_user_agent,
                 channel=channel,
                 stream_metadata=stream_metadata
             )
@@ -1271,9 +1283,9 @@ class HLSOutputManager:
                 recovery_session = HLSChannelSession(
                     channel_uuid=channel_uuid,
                     stream_url=old_url,
-                    user_agent=session.user_agent_override,
+                    user_agent=old_user_agent,
                     channel=channel,
-                    stream_metadata=session.stream_metadata
+                    stream_metadata=old_stream_metadata
                 )
                 if recovery_session.start():
                     self._sessions[channel_uuid] = recovery_session
@@ -1283,9 +1295,18 @@ class HLSOutputManager:
                         'recovered': True
                     }
                 else:
-                    # Complete failure
-                    del self._sessions[channel_uuid]
+                    # Complete failure - cleanup now
+                    if channel_uuid in self._sessions:
+                        del self._sessions[channel_uuid]
                     self._release_ownership(channel_uuid)
+                    # Clean up the HLS directory since we're completely done
+                    try:
+                        import shutil
+                        output_path = hls_config.get_channel_path(channel_uuid)
+                        if os.path.exists(output_path):
+                            shutil.rmtree(output_path)
+                    except Exception as e:
+                        logger.warning(f"HLS {channel_uuid}: Error cleaning up directory after failure: {e}")
                     return {
                         'status': 'error',
                         'message': 'Failed to switch stream and recovery failed',
