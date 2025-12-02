@@ -19,8 +19,8 @@ from django.views.decorators.http import require_http_methods
 from rest_framework.decorators import api_view, permission_classes
 from apps.channels.models import Channel, Stream
 from apps.m3u.models import M3UAccountProfile
+from apps.accounts.permissions import IsAdmin
 from dispatcharr.utils import network_access_allowed
-from dispatcharr.permissions import IsAdmin
 from .manager import hls_manager, get_direct_stream_url
 from .config import hls_config
 from .client_manager import hls_client_manager
