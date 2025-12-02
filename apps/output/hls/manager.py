@@ -889,6 +889,40 @@ class HLSOutputManager:
         """Get the Redis key for channel ownership."""
         return f"{self.OWNER_KEY_PREFIX}{channel_uuid}{self.OWNER_KEY_SUFFIX}"
 
+    def _am_i_owner(self, channel_uuid: str) -> bool:
+        """
+        Check if this worker owns the channel.
+
+        Unlike _try_acquire_ownership, this does NOT try to acquire ownership
+        if no one owns it. It simply checks if WE currently own it.
+
+        Returns:
+            True if we own the channel, False otherwise
+        """
+        redis_client = self._get_redis_client()
+        if not redis_client:
+            # No Redis - check if we have a local session
+            with self._sessions_lock:
+                return channel_uuid in self._sessions
+
+        try:
+            owner_key = self._get_owner_key(channel_uuid)
+            current_owner = redis_client.get(owner_key)
+
+            if current_owner:
+                current_owner = current_owner.decode('utf-8') if isinstance(current_owner, bytes) else current_owner
+                return current_owner == self._worker_id
+
+            # No owner in Redis - check local sessions as fallback
+            with self._sessions_lock:
+                return channel_uuid in self._sessions
+
+        except Exception as e:
+            logger.warning(f"HLS {channel_uuid}: Redis error checking ownership: {e}")
+            # On Redis failure, check local sessions
+            with self._sessions_lock:
+                return channel_uuid in self._sessions
+
     def _try_acquire_ownership(self, channel_uuid: str) -> bool:
         """
         Try to acquire ownership of a channel using Redis SETNX.
@@ -1121,11 +1155,11 @@ class HLSOutputManager:
         logger.info(f"HLS change_stream_url called for channel {channel_uuid}")
 
         # Check if we own this channel
-        if not self._check_ownership(channel_uuid):
+        if not self._am_i_owner(channel_uuid):
             # We don't own this channel - check if it exists in Redis
             redis_client = self._get_redis_client()
             if redis_client:
-                owner_key = f"hls_output:channel:{channel_uuid}:owner"
+                owner_key = self._get_owner_key(channel_uuid)
                 owner = redis_client.get(owner_key)
                 if owner:
                     # Another worker owns this channel - publish event for them
