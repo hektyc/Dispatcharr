@@ -1097,6 +1097,191 @@ class HLSOutputManager:
                 self._release_ownership(channel_uuid)
                 logger.info(f"HLS session stopped for {channel_uuid}")
 
+    def change_stream_url(self, channel_uuid: str, new_url: str, user_agent: str = None,
+                          stream_id: int = None, m3u_profile_id: int = None) -> dict:
+        """
+        Change the stream URL for an active HLS session.
+
+        This stops the current FFmpeg process and restarts it with the new URL.
+        Unlike TS Proxy which can seamlessly switch URLs, HLS requires restarting
+        FFmpeg because it writes to disk.
+
+        Args:
+            channel_uuid: UUID of the channel
+            new_url: New stream URL to switch to
+            user_agent: Optional user agent for the new stream
+            stream_id: Optional stream ID for metadata tracking
+            m3u_profile_id: Optional M3U profile ID for metadata tracking
+
+        Returns:
+            dict: Result information including success status
+        """
+        from apps.channels.models import Channel
+
+        logger.info(f"HLS change_stream_url called for channel {channel_uuid}")
+
+        # Check if we own this channel
+        if not self._check_ownership(channel_uuid):
+            # We don't own this channel - check if it exists in Redis
+            redis_client = self._get_redis_client()
+            if redis_client:
+                owner_key = f"hls_output:channel:{channel_uuid}:owner"
+                owner = redis_client.get(owner_key)
+                if owner:
+                    # Another worker owns this channel - publish event for them
+                    logger.info(f"HLS channel {channel_uuid} owned by another worker, publishing stream change event")
+                    self._publish_stream_change_event(channel_uuid, new_url, user_agent, stream_id, m3u_profile_id)
+                    return {
+                        'status': 'success',
+                        'direct_update': False,
+                        'event_published': True,
+                        'message': 'Stream change event published'
+                    }
+                else:
+                    # No owner - channel doesn't exist
+                    return {
+                        'status': 'error',
+                        'message': 'Channel not found - no active HLS session'
+                    }
+            else:
+                return {
+                    'status': 'error',
+                    'message': 'Redis not available'
+                }
+
+        # We own this channel - perform the switch
+        with self._sessions_lock:
+            session = self._sessions.get(channel_uuid)
+            if not session:
+                return {
+                    'status': 'error',
+                    'message': 'No active session for this channel'
+                }
+
+            # Get the channel object for metadata
+            try:
+                channel = Channel.objects.get(uuid=channel_uuid)
+            except Channel.DoesNotExist:
+                return {
+                    'status': 'error',
+                    'message': 'Channel not found in database'
+                }
+
+            # Build new stream metadata
+            stream_metadata = {}
+            if stream_id:
+                stream_metadata['stream_id'] = str(stream_id)
+                # Get stream name
+                try:
+                    from apps.channels.models import Stream
+                    stream = Stream.objects.get(pk=stream_id)
+                    stream_metadata['stream_name'] = stream.name
+                except Exception:
+                    pass
+
+            if m3u_profile_id:
+                stream_metadata['m3u_profile_id'] = str(m3u_profile_id)
+                # Get profile name
+                try:
+                    from apps.m3u.models import M3UAccountProfile
+                    profile = M3UAccountProfile.objects.get(pk=m3u_profile_id)
+                    stream_metadata['m3u_profile_name'] = profile.name
+                    if profile.m3u_account:
+                        stream_metadata['m3u_account_name'] = profile.m3u_account.name
+                except Exception:
+                    pass
+
+            # Get HLS stream profile info
+            hls_profile = channel.get_hls_stream_profile()
+            if hls_profile:
+                stream_metadata['stream_profile'] = str(hls_profile.id)
+                stream_metadata['stream_profile_name'] = hls_profile.name
+
+            old_url = session.stream_url
+            logger.info(f"HLS {channel_uuid}: Switching stream from {old_url[:50]}... to {new_url[:50]}...")
+
+            # Stop the current session
+            session.stop()
+
+            # Create new session with new URL
+            new_session = HLSChannelSession(
+                channel_uuid=channel_uuid,
+                stream_url=new_url,
+                user_agent=user_agent,
+                channel=channel,
+                stream_metadata=stream_metadata
+            )
+
+            # Start the new session
+            if new_session.start():
+                self._sessions[channel_uuid] = new_session
+
+                # Update Redis metadata
+                hls_client_manager.update_channel_metadata(
+                    channel_uuid,
+                    new_url,
+                    stream_metadata
+                )
+
+                logger.info(f"HLS {channel_uuid}: Stream switch successful")
+                return {
+                    'status': 'success',
+                    'direct_update': True,
+                    'old_url': old_url,
+                    'new_url': new_url,
+                    'stream_id': stream_id
+                }
+            else:
+                # Failed to start new session - try to restart with old URL
+                logger.error(f"HLS {channel_uuid}: Failed to start new session, attempting recovery")
+                recovery_session = HLSChannelSession(
+                    channel_uuid=channel_uuid,
+                    stream_url=old_url,
+                    user_agent=session.user_agent_override,
+                    channel=channel,
+                    stream_metadata=session.stream_metadata
+                )
+                if recovery_session.start():
+                    self._sessions[channel_uuid] = recovery_session
+                    return {
+                        'status': 'error',
+                        'message': 'Failed to switch stream, recovered to previous URL',
+                        'recovered': True
+                    }
+                else:
+                    # Complete failure
+                    del self._sessions[channel_uuid]
+                    self._release_ownership(channel_uuid)
+                    return {
+                        'status': 'error',
+                        'message': 'Failed to switch stream and recovery failed',
+                        'recovered': False
+                    }
+
+    def _publish_stream_change_event(self, channel_uuid: str, new_url: str, user_agent: str = None,
+                                      stream_id: int = None, m3u_profile_id: int = None):
+        """Publish a stream change event via Redis PubSub for other workers."""
+        redis_client = self._get_redis_client()
+        if not redis_client:
+            logger.error("Cannot publish stream change event - Redis not available")
+            return
+
+        import json
+        event_data = {
+            'type': 'stream_change',
+            'channel_uuid': channel_uuid,
+            'new_url': new_url,
+            'user_agent': user_agent,
+            'stream_id': stream_id,
+            'm3u_profile_id': m3u_profile_id
+        }
+
+        try:
+            redis_client.publish('hls_output:events', json.dumps(event_data))
+            logger.info(f"Published HLS stream change event for channel {channel_uuid}")
+        except Exception as e:
+            logger.error(f"Failed to publish stream change event: {e}")
+
     def get_session(self, channel_uuid: str) -> Optional[HLSChannelSession]:
         """Get an existing session without starting a new one."""
         with self._sessions_lock:

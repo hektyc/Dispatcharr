@@ -5,17 +5,22 @@ import os
 import glob
 import time
 import uuid
+import json
 import logging
 from django.http import (
     HttpResponse,
     HttpResponseNotFound,
     FileResponse,
     StreamingHttpResponse,
+    JsonResponse,
 )
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from apps.channels.models import Channel
+from rest_framework.decorators import api_view, permission_classes
+from apps.channels.models import Channel, Stream
+from apps.m3u.models import M3UAccountProfile
 from dispatcharr.utils import network_access_allowed
+from dispatcharr.permissions import IsAdmin
 from .manager import hls_manager, get_direct_stream_url
 from .config import hls_config
 from .client_manager import hls_client_manager
@@ -213,3 +218,269 @@ def hls_segment(request, channel_uuid: str, segment_name: str):
     response["Access-Control-Allow-Origin"] = "*"
     return response
 
+
+def _get_stream_info_for_hls_switch(channel_uuid: str, target_stream_id: int) -> dict:
+    """
+    Get stream information for an HLS stream switch.
+
+    Args:
+        channel_uuid: UUID of the channel
+        target_stream_id: Stream ID to switch to
+
+    Returns:
+        dict: Stream info including url, user_agent, stream_id, m3u_profile_id
+              or dict with 'error' key on failure
+    """
+    try:
+        from apps.proxy.ts_proxy.url_utils import transform_url
+        from core.utils import RedisClient
+
+        channel = Channel.objects.get(uuid=channel_uuid)
+        redis_client = RedisClient.get_client()
+
+        # Get the target stream
+        stream = Stream.objects.get(pk=target_stream_id)
+
+        # Find compatible profile for this stream
+        m3u_account = stream.m3u_account
+        if not m3u_account:
+            return {'error': 'Stream has no M3U account'}
+
+        m3u_profiles = m3u_account.profiles.filter(is_active=True)
+        default_profile = next((obj for obj in m3u_profiles if obj.is_default), None)
+
+        if not default_profile:
+            return {'error': 'M3U account has no default profile'}
+
+        # Check profiles in order: default first, then others
+        profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default]
+
+        selected_profile = None
+        for profile in profiles:
+            if redis_client:
+                profile_connections_key = f"profile_connections:{profile.id}"
+                current_connections = int(redis_client.get(profile_connections_key) or 0)
+
+                # Check if this channel is already using this profile
+                channel_using_profile = False
+                existing_stream_id = redis_client.get(f"channel_stream:{channel.id}")
+                if existing_stream_id:
+                    existing_stream_id = existing_stream_id.decode('utf-8')
+                    existing_profile_id = redis_client.get(f"stream_profile:{existing_stream_id}")
+                    if existing_profile_id and int(existing_profile_id.decode('utf-8')) == profile.id:
+                        channel_using_profile = True
+
+                effective_connections = current_connections - (1 if channel_using_profile else 0)
+
+                if profile.max_streams == 0 or effective_connections < profile.max_streams:
+                    selected_profile = profile
+                    break
+            else:
+                selected_profile = profile
+                break
+
+        if not selected_profile:
+            return {'error': 'No profiles available with connection capacity'}
+
+        # Get user agent from M3U account
+        user_agent = m3u_account.get_user_agent().user_agent
+
+        # Transform URL using M3U profile patterns
+        stream_url = transform_url(
+            stream.url,
+            selected_profile.search_pattern,
+            selected_profile.replace_pattern
+        )
+
+        return {
+            'url': stream_url,
+            'user_agent': user_agent,
+            'stream_id': target_stream_id,
+            'm3u_profile_id': selected_profile.id,
+            'm3u_profile_name': selected_profile.name,
+            'm3u_account_name': m3u_account.name
+        }
+
+    except Channel.DoesNotExist:
+        return {'error': 'Channel not found'}
+    except Stream.DoesNotExist:
+        return {'error': 'Stream not found'}
+    except Exception as e:
+        logger.error(f"Error getting stream info for HLS switch: {e}", exc_info=True)
+        return {'error': str(e)}
+
+
+@csrf_exempt
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def change_stream(request, channel_uuid: str):
+    """
+    Change stream URL for an existing HLS channel.
+
+    This endpoint mirrors the TS Proxy's change_stream endpoint but for HLS output.
+    It stops the current FFmpeg process and restarts with the new stream URL.
+
+    URL: /output/hls/change_stream/{channel_uuid}
+    """
+    try:
+        data = json.loads(request.body)
+        new_url = data.get("url")
+        user_agent = data.get("user_agent")
+        stream_id = data.get("stream_id")
+
+        # If stream_id is provided, get the URL and user_agent from it
+        m3u_profile_id = None
+        if stream_id:
+            logger.info(f"HLS stream switch: Stream ID {stream_id} provided for channel {channel_uuid}")
+            stream_info = _get_stream_info_for_hls_switch(channel_uuid, stream_id)
+
+            if 'error' in stream_info:
+                return JsonResponse(
+                    {"error": stream_info["error"], "stream_id": stream_id},
+                    status=404
+                )
+
+            new_url = stream_info['url']
+            user_agent = stream_info['user_agent']
+            m3u_profile_id = stream_info.get('m3u_profile_id')
+        elif not new_url:
+            return JsonResponse(
+                {"error": "Either url or stream_id must be provided"},
+                status=400
+            )
+
+        logger.info(f"HLS: Attempting to change stream for channel {channel_uuid}")
+
+        # Use the HLS manager to change the stream
+        result = hls_manager.change_stream_url(
+            channel_uuid,
+            new_url,
+            user_agent,
+            stream_id,
+            m3u_profile_id
+        )
+
+        if result.get('status') == 'error':
+            return JsonResponse(
+                {
+                    "error": result.get('message', 'Unknown error'),
+                    "diagnostics": result
+                },
+                status=404
+            )
+
+        # Format response
+        response_data = {
+            "message": "Stream changed successfully",
+            "channel": channel_uuid,
+            "url": new_url,
+            "direct_update": result.get('direct_update', False),
+        }
+
+        if stream_id:
+            response_data["stream_id"] = stream_id
+        if m3u_profile_id:
+            response_data["m3u_profile_id"] = m3u_profile_id
+
+        return JsonResponse(response_data)
+
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.error(f"HLS: Failed to change stream: {e}", exc_info=True)
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def next_stream(request, channel_uuid: str):
+    """
+    Switch to the next available stream for an HLS channel.
+
+    This endpoint mirrors the TS Proxy's next_stream endpoint but for HLS output.
+    It finds the next available stream in the channel's stream list and switches to it.
+
+    URL: /output/hls/next_stream/{channel_uuid}
+    """
+    try:
+        logger.info(f"HLS next_stream called for channel {channel_uuid}")
+
+        # Get the channel
+        try:
+            channel = Channel.objects.get(uuid=channel_uuid)
+        except Channel.DoesNotExist:
+            return JsonResponse({"error": "Channel not found"}, status=404)
+
+        # Get current stream ID from Redis metadata
+        from core.utils import RedisClient
+        redis_client = RedisClient.get_client()
+
+        current_stream_id = None
+        if redis_client:
+            metadata_key = f"hls_output:channel:{channel_uuid}:metadata"
+            stream_id_bytes = redis_client.hget(metadata_key, "stream_id")
+            if stream_id_bytes:
+                current_stream_id = int(stream_id_bytes.decode('utf-8'))
+
+        # Get all streams for this channel in order
+        streams = channel.streams.all().order_by('channelstream__order')
+
+        if not streams.exists():
+            return JsonResponse({"error": "No streams assigned to channel"}, status=404)
+
+        # Find the next stream
+        stream_list = list(streams)
+        next_stream = None
+
+        if current_stream_id:
+            # Find current stream index and get next one
+            for i, stream in enumerate(stream_list):
+                if stream.id == current_stream_id:
+                    # Get next stream (wrap around to first if at end)
+                    next_index = (i + 1) % len(stream_list)
+                    next_stream = stream_list[next_index]
+                    break
+
+        if not next_stream:
+            # Current stream not found or not set, use first stream
+            next_stream = stream_list[0]
+
+        # Get stream info for the next stream
+        stream_info = _get_stream_info_for_hls_switch(channel_uuid, next_stream.id)
+
+        if 'error' in stream_info:
+            return JsonResponse(
+                {"error": stream_info["error"], "stream_id": next_stream.id},
+                status=404
+            )
+
+        # Perform the switch
+        result = hls_manager.change_stream_url(
+            channel_uuid,
+            stream_info['url'],
+            stream_info['user_agent'],
+            next_stream.id,
+            stream_info.get('m3u_profile_id')
+        )
+
+        if result.get('status') == 'error':
+            return JsonResponse(
+                {
+                    "error": result.get('message', 'Unknown error'),
+                    "diagnostics": result
+                },
+                status=404
+            )
+
+        return JsonResponse({
+            "message": "Switched to next stream",
+            "channel": channel_uuid,
+            "stream_id": next_stream.id,
+            "stream_name": next_stream.name,
+            "previous_stream_id": current_stream_id
+        })
+
+    except Exception as e:
+        logger.error(f"HLS: Failed to switch to next stream: {e}", exc_info=True)
+        return JsonResponse({"error": str(e)}, status=500)

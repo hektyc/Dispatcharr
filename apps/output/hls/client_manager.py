@@ -583,6 +583,61 @@ class HLSClientManager:
         except Exception as e:
             logger.error(f"Error setting HLS channel inactive: {e}")
 
+    def update_channel_metadata(self, channel_uuid: str, stream_url: str = None,
+                                 stream_metadata: dict = None):
+        """
+        Update channel metadata after a stream switch.
+
+        This updates the Redis metadata for an active HLS channel without
+        changing the state or PID. Used when switching streams.
+
+        Args:
+            channel_uuid: The channel UUID
+            stream_url: The new stream URL
+            stream_metadata: New stream metadata (stream_id, stream_name, m3u_profile, etc.)
+        """
+        try:
+            if self.redis_client:
+                current_time = str(time.time())
+                metadata_key = self._get_channel_metadata_key(channel_uuid)
+
+                # Only update if metadata exists (channel is active)
+                if not self.redis_client.exists(metadata_key):
+                    logger.warning(f"Cannot update metadata for inactive channel {channel_uuid}")
+                    return
+
+                mapping = {
+                    "last_activity": current_time,
+                }
+
+                if stream_url:
+                    mapping["url"] = stream_url
+
+                # Update stream metadata
+                if stream_metadata:
+                    if stream_metadata.get("stream_id"):
+                        mapping["stream_id"] = stream_metadata["stream_id"]
+                    if stream_metadata.get("stream_name"):
+                        mapping["stream_name"] = stream_metadata["stream_name"]
+                    if stream_metadata.get("stream_profile"):
+                        mapping["stream_profile"] = stream_metadata["stream_profile"]
+                    if stream_metadata.get("stream_profile_name"):
+                        mapping["stream_profile_name"] = stream_metadata["stream_profile_name"]
+                    if stream_metadata.get("m3u_profile_id"):
+                        mapping["m3u_profile_id"] = stream_metadata["m3u_profile_id"]
+                    if stream_metadata.get("m3u_profile_name"):
+                        mapping["m3u_profile_name"] = stream_metadata["m3u_profile_name"]
+                    if stream_metadata.get("m3u_account_name"):
+                        mapping["m3u_account_name"] = stream_metadata["m3u_account_name"]
+
+                self.redis_client.hset(metadata_key, mapping=mapping)
+
+                logger.info(f"HLS channel metadata updated: {channel_uuid}")
+                self._trigger_stats_update()
+
+        except Exception as e:
+            logger.error(f"Error updating HLS channel metadata: {e}")
+
     def _start_cleanup_thread(self):
         """Start the background cleanup thread that stops inactive HLS sessions."""
         if self._cleanup_thread is not None and self._cleanup_thread.is_alive():

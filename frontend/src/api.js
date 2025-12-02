@@ -2199,15 +2199,28 @@ export default class API {
     }
   }
 
-  static async switchStream(channelId, streamId) {
+  /**
+   * Switch to a specific stream for a channel.
+   * Automatically routes to the correct endpoint based on channel type.
+   *
+   * @param {string} channelId - The channel UUID
+   * @param {string|number} streamId - The stream ID to switch to
+   * @param {string} channelType - Optional channel type ('hls' for HLS Output, otherwise TS Proxy)
+   * @returns {Promise<object>} - The API response
+   */
+  static async switchStream(channelId, streamId, channelType = null) {
     try {
-      const response = await request(
-        `${host}/proxy/ts/change_stream/${channelId}`,
-        {
-          method: 'POST',
-          body: { stream_id: streamId },
-        }
-      );
+      // Determine the correct endpoint based on channel type
+      // HLS Output channels have type='hls', TS Proxy channels don't have this field
+      const endpoint =
+        channelType === 'hls'
+          ? `${host}/output/hls/change_stream/${channelId}`
+          : `${host}/proxy/ts/change_stream/${channelId}`;
+
+      const response = await request(endpoint, {
+        method: 'POST',
+        body: { stream_id: streamId },
+      });
 
       return response;
     } catch (e) {
@@ -2216,15 +2229,27 @@ export default class API {
     }
   }
 
-  static async nextStream(channelId, streamId) {
+  /**
+   * Switch to the next available stream for a channel.
+   * Automatically routes to the correct endpoint based on channel type.
+   *
+   * @param {string} channelId - The channel UUID
+   * @param {string|number} streamId - The current stream ID (for reference)
+   * @param {string} channelType - Optional channel type ('hls' for HLS Output, otherwise TS Proxy)
+   * @returns {Promise<object>} - The API response
+   */
+  static async nextStream(channelId, streamId, channelType = null) {
     try {
-      const response = await request(
-        `${host}/proxy/ts/next_stream/${channelId}`,
-        {
-          method: 'POST',
-          body: { stream_id: streamId },
-        }
-      );
+      // Determine the correct endpoint based on channel type
+      const endpoint =
+        channelType === 'hls'
+          ? `${host}/output/hls/next_stream/${channelId}`
+          : `${host}/proxy/ts/next_stream/${channelId}`;
+
+      const response = await request(endpoint, {
+        method: 'POST',
+        body: { stream_id: streamId },
+      });
 
       return response;
     } catch (e) {

@@ -5,6 +5,17 @@ from . import views
 app_name = "hls"
 
 urlpatterns = [
+    # Stream switching endpoints (must be before the UUID patterns to avoid conflicts)
+    path(
+        "change_stream/<str:channel_uuid>",
+        views.change_stream,
+        name="change_stream"
+    ),
+    path(
+        "next_stream/<str:channel_uuid>",
+        views.next_stream,
+        name="next_stream"
+    ),
     # Master playlist: /output/hls/{channel_uuid}/playlist.m3u8
     re_path(
         r"^(?P<channel_uuid>[0-9a-fA-F\-]+)/playlist\.m3u8$",

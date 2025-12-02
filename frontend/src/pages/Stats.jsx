@@ -800,9 +800,15 @@ const ChannelCard = ({
         (s) => s.id.toString() === streamId
       );
       console.log('Selected stream details:', selectedStream);
+      console.log('Channel type:', channel.type);
 
       // Make sure we're passing the correct ID to the API
-      const response = await API.switchStream(channel.channel_id, streamId);
+      // Pass channel.type to route to correct endpoint (HLS Output vs TS Proxy)
+      const response = await API.switchStream(
+        channel.channel_id,
+        streamId,
+        channel.type
+      );
       console.log('Stream switch API response:', response);
 
       // Update the local active stream ID immediately
