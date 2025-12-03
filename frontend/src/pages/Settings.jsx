@@ -1179,7 +1179,7 @@ const SettingsPage = () => {
                     />
                     <NumberInput
                       label="Shutdown Delay (seconds)"
-                      description="Time to wait after last client disconnects before stopping the HLS stream. HLS clients fetch segments every 6 seconds, so this should be higher than segment duration."
+                      description="Time to wait after last client disconnects before stopping the HLS stream. Minimum 15 seconds required - HDHR clients like Plex need time to buffer before requesting segments."
                       value={hlsSettings.shutdown_delay}
                       onChange={(value) =>
                         setHlsSettings((prev) => ({
@@ -1187,7 +1187,7 @@ const SettingsPage = () => {
                           shutdown_delay: value,
                         }))
                       }
-                      min={0}
+                      min={15}
                       max={300}
                     />
                     <NumberInput

@@ -16,6 +16,9 @@ else:
 
 ALLOWED_HOSTS = ["*"]
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# Trust X-Forwarded-Host header from nginx for correct URL generation
+# This ensures request.build_absolute_uri() uses the correct host/port
+USE_X_FORWARDED_HOST = True
 
 INSTALLED_APPS = [
     "apps.api",

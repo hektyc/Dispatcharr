@@ -188,14 +188,15 @@ class HLSClientManager:
                 })
                 self.redis_client.expire(client_key, client_ttl)
 
-                # Update channel metadata
+                # Update channel metadata - only update specific fields, don't overwrite
+                # IMPORTANT: Use hset with individual fields to preserve PID and other
+                # metadata set by set_channel_active(). Using mapping={} would overwrite
+                # the entire hash and lose the PID field which is critical for cleanup.
                 metadata_key = self._get_channel_metadata_key(channel_uuid)
-                self.redis_client.hset(metadata_key, mapping={
-                    "state": "running",
-                    "type": "hls",
-                    "last_activity": current_time,
-                })
-                self.redis_client.expire(metadata_key, client_ttl * 2)
+                self.redis_client.hset(metadata_key, "state", "running")
+                self.redis_client.hset(metadata_key, "last_activity", current_time)
+                # Extend TTL generously - set_channel_active uses client_ttl * 10
+                self.redis_client.expire(metadata_key, client_ttl * 10)
             
             logger.info(f"HLS client connected: {client_id} for channel {channel_uuid}")
             

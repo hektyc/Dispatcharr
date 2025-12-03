@@ -112,7 +112,7 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
     retention_seconds = serializers.IntegerField(min_value=0, max_value=3600, required=False, default=0)
     ll_hls_enabled = serializers.BooleanField(required=False, default=False)
     use_fmp4_segments = serializers.BooleanField(required=False, default=False)
-    shutdown_delay = serializers.IntegerField(min_value=0, max_value=300, required=False, default=30)
+    shutdown_delay = serializers.IntegerField(min_value=15, max_value=300, required=False, default=30)
 
     def validate_segment_duration(self, value):
         if value < 2 or value > 10:
@@ -127,6 +127,15 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
     def validate_retention_seconds(self, value):
         if value < 0 or value > 3600:
             raise serializers.ValidationError("Retention must be between 0 and 3600 seconds (0 = immediate cleanup)")
+        return value
+
+    def validate_shutdown_delay(self, value):
+        if value < 15:
+            raise serializers.ValidationError(
+                "Shutdown delay must be at least 15 seconds. HDHR clients like Plex need time to buffer before requesting segments."
+            )
+        if value > 300:
+            raise serializers.ValidationError("Shutdown delay must be at most 300 seconds")
         return value
 
     def validate_shutdown_delay(self, value):

@@ -198,9 +198,23 @@ class HLSConfig:
 
         Default is 30 seconds to account for HLS segment duration and
         client buffering behavior.
+
+        IMPORTANT: Enforces a minimum of 15 seconds regardless of stored value.
+        HLS clients (like Plex) may take 10+ seconds to buffer and start
+        requesting segments. A shutdown_delay less than 15 seconds will cause
+        premature session termination before clients can connect.
         """
         settings = self._load_settings()
-        return settings.get("shutdown_delay", 30)
+        delay = settings.get("shutdown_delay", 30)
+        # Enforce minimum of 15 seconds for HLS stability
+        # Plex and other HDHR clients need time to buffer and start playback
+        MIN_SHUTDOWN_DELAY = 15
+        if delay < MIN_SHUTDOWN_DELAY:
+            logger.debug(
+                f"HLS shutdown_delay {delay}s is below minimum, using {MIN_SHUTDOWN_DELAY}s"
+            )
+            delay = MIN_SHUTDOWN_DELAY
+        return delay
 
     def get_channel_path(self, channel_uuid):
         """Get the output path for a specific channel."""
