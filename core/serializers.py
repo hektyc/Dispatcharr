@@ -111,6 +111,7 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
     playlist_size = serializers.IntegerField(min_value=3, max_value=10, required=False, default=5)
     retention_seconds = serializers.IntegerField(min_value=0, max_value=3600, required=False, default=0)
     ll_hls_enabled = serializers.BooleanField(required=False, default=False)
+    use_fmp4_segments = serializers.BooleanField(required=False, default=False)
     shutdown_delay = serializers.IntegerField(min_value=0, max_value=300, required=False, default=30)
 
     def validate_segment_duration(self, value):
