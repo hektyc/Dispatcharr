@@ -584,6 +584,10 @@ class HLSChannelSession:
         # Add fMP4 container format options (required for fMP4 segments)
         if use_fmp4:
             cmd.extend([
+                # AAC ADTS to ASC conversion is REQUIRED for fMP4/MP4 container
+                # MPEG-TS streams have AAC in ADTS format, but MP4/fMP4 requires ASC format
+                # Without this, FFmpeg fails with "Malformed AAC bitstream detected"
+                "-bsf:a", "aac_adtstoasc",
                 "-hls_fmp4_init_filename", "init.mp4",
                 "-hls_segment_type", "fmp4",
             ])
@@ -1036,10 +1040,10 @@ class HLSChannelSession:
                     stream_metadata=new_metadata
                 )
 
-                # Reset tried streams for successful switch - the new session starts fresh
-                # Only the current stream should be marked as tried initially
-                # This allows the new session to try other streams if it also fails
-                new_session._tried_stream_ids = {stream_id}
+                # Pass the accumulated tried streams to the new session
+                # This prevents infinite retry loops when all streams fail with the same error
+                # (e.g., AAC bitstream issue with fMP4 that affects all streams)
+                new_session._tried_stream_ids = self._tried_stream_ids.copy()
                 new_session._current_stream_id = stream_id
 
                 # Try to start the new session
