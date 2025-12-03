@@ -173,6 +173,22 @@ class HLSConfig:
         return settings.get("ll_hls_enabled", False)
 
     @property
+    def use_fmp4_segments(self):
+        """Check if fMP4 segments should be used instead of MPEG-TS.
+
+        fMP4 (fragmented MP4) is a more modern container format that:
+        - Supports more codecs (H.265/HEVC, VP9, AV1, AAC, AC-3, etc.)
+        - Is more efficient (~10-15% smaller file sizes)
+        - Provides better seeking precision
+        - Is the basis for CMAF (Common Media Application Format)
+
+        Note: This is automatically enabled when LL-HLS is enabled.
+        """
+        settings = self._load_settings()
+        # fMP4 is enabled if explicitly set OR if LL-HLS is enabled
+        return settings.get("use_fmp4_segments", False) or self.ll_hls_enabled
+
+    @property
     def shutdown_delay(self):
         """Get HLS-specific shutdown delay in seconds.
 
@@ -214,6 +230,7 @@ class HLSConfig:
             "playlist_size": self.playlist_size,
             "retention_seconds": self.retention_seconds,
             "ll_hls_enabled": self.ll_hls_enabled,
+            "use_fmp4_segments": self.use_fmp4_segments,
             "shutdown_delay": self.shutdown_delay,
         }
 

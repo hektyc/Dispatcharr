@@ -453,6 +453,7 @@ class CoreSettings(models.Model):
                 "playlist_size": 5,
                 "retention_seconds": 0,
                 "ll_hls_enabled": False,
+                "use_fmp4_segments": False,
                 "shutdown_delay": 30,  # HLS-specific shutdown delay (seconds)
             }
 

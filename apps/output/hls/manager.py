@@ -465,17 +465,15 @@ class HLSChannelSession:
             logger.warning(f"No HLS profile found for {self.channel_uuid}, using fallback")
             return self._build_fallback_command()
 
-        # Check if this is an HLS Proxy profile
-        if profile.is_hls_proxy():
+        # Check if this is a locked HLS profile (Proxy or FFmpeg)
+        # Both use the fallback command to ensure dynamic segment format support
+        if profile.is_hls_proxy() or profile.is_hls_ffmpeg():
             if self._is_source_hls():
-                # Source is already HLS - TODO: implement HLS passthrough proxy
-                # For now, we still need to use FFmpeg to re-segment it
-                logger.info(f"HLS Proxy: source is HLS for {self.channel_uuid}, using remux")
+                logger.info(f"HLS {profile.name}: source is HLS for {self.channel_uuid}, using remux")
             else:
-                # Source is MPEG-TS or other - we need FFmpeg to convert to HLS
-                logger.info(f"HLS Proxy: source is MPEG-TS for {self.channel_uuid}, using remux")
+                logger.info(f"HLS {profile.name}: source is MPEG-TS for {self.channel_uuid}, using remux")
 
-            # For HLS Proxy, always use fallback remux command (copy codecs, no transcoding)
+            # Use fallback command which supports dynamic segment format (fMP4/TS)
             return self._build_fallback_command()
 
         # Get user agent
@@ -528,8 +526,9 @@ class HLSChannelSession:
         segment_duration = hls_config.segment_duration
         playlist_size = hls_config.playlist_size
         ll_hls_enabled = hls_config.ll_hls_enabled
+        use_fmp4 = hls_config.use_fmp4_segments  # Includes LL-HLS check
 
-        logger.info(f"HLS {self.channel_uuid}: Building FFmpeg command with segment_duration={segment_duration}, playlist_size={playlist_size}, ll_hls={ll_hls_enabled}")
+        logger.info(f"HLS {self.channel_uuid}: Building FFmpeg command with segment_duration={segment_duration}, playlist_size={playlist_size}, ll_hls={ll_hls_enabled}, fmp4={use_fmp4}")
 
         playlist_path = os.path.join(self.output_path, "index.m3u8")
         user_agent = self._get_user_agent()
@@ -540,17 +539,21 @@ class HLSChannelSession:
         # - program_date_time: Add EXT-X-PROGRAM-DATE-TIME for better player sync
         hls_flags = "delete_segments+append_list+program_date_time"
 
-        # Determine segment extension based on LL-HLS mode
-        # LL-HLS uses fMP4 segments (.m4s), regular HLS uses MPEG-TS (.ts)
-        if ll_hls_enabled:
-            # LL-HLS requires additional flags for lower latency
-            hls_flags += "+independent_segments"
+        # Determine segment extension based on fMP4 setting
+        # fMP4 uses .m4s segments, regular HLS uses MPEG-TS (.ts)
+        # Note: use_fmp4 is automatically true when LL-HLS is enabled
+        if use_fmp4:
             segment_ext = "m4s"
-            logger.info(f"HLS {self.channel_uuid}: LL-HLS enabled - using fMP4 segments (.m4s)")
-            # Note: True LL-HLS requires HTTP/2 for server push. Without HTTP/2,
-            # the benefit is limited to slightly faster segment availability.
+            logger.info(f"HLS {self.channel_uuid}: Using fMP4 segments (.m4s)")
         else:
             segment_ext = "ts"
+            logger.info(f"HLS {self.channel_uuid}: Using MPEG-TS segments (.ts)")
+
+        # LL-HLS requires additional flags for lower latency
+        if ll_hls_enabled:
+            hls_flags += "+independent_segments"
+            # Note: True LL-HLS requires HTTP/2 for server push. Without HTTP/2,
+            # the benefit is limited to slightly faster segment availability.
 
         # Use %d instead of %05d to allow unlimited segment numbers (no 5-digit limit)
         # This supports indefinite streaming without segment number overflow
@@ -578,8 +581,8 @@ class HLSChannelSession:
             "-hls_segment_filename", segment_pattern,
         ]
 
-        # Add LL-HLS specific options (fMP4 container format)
-        if ll_hls_enabled:
+        # Add fMP4 container format options (required for fMP4 segments)
+        if use_fmp4:
             cmd.extend([
                 "-hls_fmp4_init_filename", "init.mp4",
                 "-hls_segment_type", "fmp4",

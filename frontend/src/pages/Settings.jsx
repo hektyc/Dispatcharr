@@ -204,6 +204,7 @@ const SettingsPage = () => {
     playlist_size: 5,
     retention_seconds: 0,
     ll_hls_enabled: false,
+    use_fmp4_segments: false,
     shutdown_delay: 30,
   });
   const [hlsSettingsSaved, setHlsSettingsSaved] = useState(false);
@@ -1229,8 +1230,20 @@ const SettingsPage = () => {
                       max={3600}
                     />
                     <Switch
+                      label="Use fMP4 Segments"
+                      description="Use fMP4 (fragmented MP4) instead of MPEG-TS (.ts) segments. fMP4 supports more codecs (H.265, VP9, AV1), is more efficient, and is the modern standard. Automatically enabled when LL-HLS is enabled."
+                      checked={hlsSettings.use_fmp4_segments || hlsSettings.ll_hls_enabled}
+                      disabled={hlsSettings.ll_hls_enabled}
+                      onChange={(e) =>
+                        setHlsSettings((prev) => ({
+                          ...prev,
+                          use_fmp4_segments: e.target.checked,
+                        }))
+                      }
+                    />
+                    <Switch
                       label="Enable Low-Latency HLS (LL-HLS)"
-                      description="Uses fMP4 segments for reduced latency. Note: Full LL-HLS benefits require HTTP/2 (via reverse proxy like nginx/caddy). Without HTTP/2, latency improvement is limited."
+                      description="Adds LL-HLS flags for reduced latency. Automatically enables fMP4 segments. Note: Full LL-HLS benefits require HTTP/2 (via reverse proxy)."
                       checked={hlsSettings.ll_hls_enabled}
                       onChange={(e) =>
                         setHlsSettings((prev) => ({
