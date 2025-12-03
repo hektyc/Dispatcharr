@@ -512,13 +512,15 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
         """Get current HLS output settings.
 
         Includes output_path from environment variable (read-only).
+        Returns the raw stored values without validation enforcement,
+        so users can see their actual saved settings.
         """
         _, settings_data = self._get_or_create_settings()
-        serializer = HLSOutputSettingsSerializer(data=settings_data)
-        serializer.is_valid()
 
-        # Add output_path from environment (read-only, not part of serializer)
-        response_data = dict(serializer.data)
+        # Return raw settings data without passing through serializer validation
+        # This preserves the user's saved values even if they don't meet new constraints
+        # Validation is only applied on save (create method)
+        response_data = dict(settings_data)
         response_data["output_path"] = self._get_output_path_from_env()
 
         return Response(response_data)
