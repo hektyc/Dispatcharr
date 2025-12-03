@@ -238,9 +238,26 @@ class HLSClientManager:
             return False
 
     def update_client_activity(self, channel_uuid: str, client_id: str) -> bool:
-        """Update client's last activity timestamp."""
+        """Update client's last activity timestamp.
+
+        IMPORTANT: Only updates if the channel is already active (has metadata).
+        This prevents stale client requests from recreating channel metadata
+        after the session has been marked inactive.
+        """
         try:
             if self.redis_client:
+                # FIRST: Check if channel is active (metadata exists)
+                # This prevents zombie channels from being created when stale
+                # client requests come in after the session was stopped
+                metadata_key = self._get_channel_metadata_key(channel_uuid)
+                if not self.redis_client.exists(metadata_key):
+                    # Channel is not active - don't create new metadata
+                    logger.debug(
+                        f"HLS update_client_activity: Channel {channel_uuid} is not active, "
+                        f"ignoring stale request from client {client_id}"
+                    )
+                    return False
+
                 current_time = str(time.time())
                 client_ttl = self._get_client_ttl()
 
@@ -254,8 +271,7 @@ class HLSClientManager:
                 self.redis_client.hset(client_key, "last_active", current_time)
                 self.redis_client.expire(client_key, client_ttl)
 
-                # Update channel metadata
-                metadata_key = self._get_channel_metadata_key(channel_uuid)
+                # Update channel metadata last_activity
                 self.redis_client.hset(metadata_key, "last_activity", current_time)
                 self.redis_client.expire(metadata_key, client_ttl * 2)
 
