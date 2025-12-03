@@ -205,7 +205,7 @@ const SettingsPage = () => {
     retention_seconds: 0,
     ll_hls_enabled: false,
     use_fmp4_segments: false,
-    shutdown_delay: 30,
+    shutdown_delay: 15,
   });
   const [hlsSettingsSaved, setHlsSettingsSaved] = useState(false);
   const [hlsSettingsLoading, setHlsSettingsLoading] = useState(false);
@@ -1183,7 +1183,7 @@ const SettingsPage = () => {
                     />
                     <NumberInput
                       label="Shutdown Delay (seconds)"
-                      description="Time to wait after last client disconnects before stopping the HLS stream. Minimum 15 seconds required - HDHR clients like Plex need time to buffer before requesting segments."
+                      description="Time to wait after last client disconnects before stopping the HLS stream. Default: 15 seconds. Higher values recommended for HDHR clients like Plex."
                       value={hlsSettings.shutdown_delay}
                       onChange={(value) =>
                         setHlsSettings((prev) => ({
@@ -1191,7 +1191,7 @@ const SettingsPage = () => {
                           shutdown_delay: value,
                         }))
                       }
-                      min={15}
+                      min={0}
                       max={300}
                     />
                     <NumberInput

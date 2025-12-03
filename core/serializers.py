@@ -111,14 +111,14 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
     - segment_duration: 2-60 seconds (higher values for slow connections)
     - playlist_size: 3-100 segments (higher values for longer buffer)
     - retention_seconds: 0-86400 (up to 24 hours for DVR-like use cases)
-    - shutdown_delay: 15-300 seconds (minimum 15 for HDHR client stability)
+    - shutdown_delay: 0-300 seconds (default 15, higher recommended for HDHR clients)
     """
     segment_duration = serializers.IntegerField(min_value=2, max_value=60, required=False, default=6)
     playlist_size = serializers.IntegerField(min_value=3, max_value=100, required=False, default=10)
     retention_seconds = serializers.IntegerField(min_value=0, max_value=86400, required=False, default=0)
     ll_hls_enabled = serializers.BooleanField(required=False, default=False)
     use_fmp4_segments = serializers.BooleanField(required=False, default=False)
-    shutdown_delay = serializers.IntegerField(min_value=15, max_value=300, required=False, default=30)
+    shutdown_delay = serializers.IntegerField(min_value=0, max_value=300, required=False, default=15)
 
     def validate_segment_duration(self, value):
         if value < 2:
@@ -142,10 +142,8 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
         return value
 
     def validate_shutdown_delay(self, value):
-        if value < 15:
-            raise serializers.ValidationError(
-                "Shutdown delay must be at least 15 seconds. HDHR clients like Plex need time to buffer before requesting segments."
-            )
+        if value < 0:
+            raise serializers.ValidationError("Shutdown delay cannot be negative")
         if value > 300:
             raise serializers.ValidationError("Shutdown delay cannot exceed 300 seconds")
         return value
