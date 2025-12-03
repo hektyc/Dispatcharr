@@ -66,6 +66,7 @@ import { USER_LEVELS } from '../../constants';
 const m3uUrlBase = `${window.location.protocol}//${window.location.host}/output/m3u`;
 const epgUrlBase = `${window.location.protocol}//${window.location.host}/output/epg`;
 const hdhrUrlBase = `${window.location.protocol}//${window.location.host}/hdhr`;
+const hdhrHlsUrlBase = `${window.location.protocol}//${window.location.host}/hdhr-hls`;
 
 const ChannelEnabledSwitch = React.memo(
   ({ rowId, selectedProfileId, selectedTableIds }) => {
@@ -303,6 +304,7 @@ const ChannelsTable = ({}) => {
   const [isLoading, setIsLoading] = useState(true);
 
   const [hdhrUrl, setHDHRUrl] = useState(hdhrUrlBase);
+  const [hdhrHlsUrl, setHDHRHlsUrl] = useState(hdhrHlsUrlBase);
   const [epgUrl, setEPGUrl] = useState(epgUrlBase);
   const [m3uUrl, setM3UUrl] = useState(m3uUrlBase);
 
@@ -670,6 +672,17 @@ const ChannelsTable = ({}) => {
     });
   };
 
+  const copyHDHRHlsUrl = async () => {
+    const success = await copyToClipboard(hdhrHlsUrl);
+    notifications.show({
+      title: success ? 'HDHR HLS URL Copied!' : 'Copy Failed',
+      message: success
+        ? 'The HDHR HLS URL has been copied to your clipboard.'
+        : 'Failed to copy HDHR HLS URL to clipboard',
+      color: success ? 'green' : 'red',
+    });
+  };
+
   const onSortingChange = (column) => {
     const sortField = sorting[0]?.id;
     const sortDirection = sorting[0]?.desc;
@@ -708,6 +721,7 @@ const ChannelsTable = ({}) => {
     const profileString =
       selectedProfileId != '0' ? `/${profiles[selectedProfileId].name}` : '';
     setHDHRUrl(`${hdhrUrlBase}${profileString}`);
+    setHDHRHlsUrl(`${hdhrHlsUrlBase}${profileString}`);
     setEPGUrl(`${epgUrlBase}${profileString}`);
     setM3UUrl(`${m3uUrlBase}${profileString}`);
   }, [selectedProfileId, profiles]);
@@ -1113,24 +1127,47 @@ const ChannelsTable = ({}) => {
                   </Button>
                 </Popover.Target>
                 <Popover.Dropdown>
-                  <Group
-                    gap="sm"
+                  <Stack
+                    gap="xs"
                     style={{
-                      minWidth: 250,
-                      maxWidth: 'min(400px, 80vw)',
+                      minWidth: 300,
+                      maxWidth: 'min(500px, 90vw)',
                       width: 'max-content',
                     }}
                   >
-                    <TextInput value={hdhrUrl} size="small" readOnly />
-                    <ActionIcon
-                      onClick={copyHDHRUrl}
-                      size="sm"
-                      variant="transparent"
-                      color="gray.5"
-                    >
-                      <Copy size="18" fontSize="small" />
-                    </ActionIcon>
-                  </Group>
+                    <TextInput
+                      value={hdhrUrl}
+                      size="xs"
+                      readOnly
+                      label="HDHR (TS)"
+                      rightSection={
+                        <ActionIcon
+                          onClick={copyHDHRUrl}
+                          size="sm"
+                          variant="transparent"
+                          color="gray.5"
+                        >
+                          <Copy size="16" />
+                        </ActionIcon>
+                      }
+                    />
+                    <TextInput
+                      value={hdhrHlsUrl}
+                      size="xs"
+                      readOnly
+                      label="HDHR (HLS)"
+                      rightSection={
+                        <ActionIcon
+                          onClick={copyHDHRHlsUrl}
+                          size="sm"
+                          variant="transparent"
+                          color="gray.5"
+                        >
+                          <Copy size="16" />
+                        </ActionIcon>
+                      }
+                    />
+                  </Stack>
                 </Popover.Dropdown>
               </Popover>
               <Popover
