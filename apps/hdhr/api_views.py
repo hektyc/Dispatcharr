@@ -98,10 +98,25 @@ class DiscoverAPIView(APIView):
 
 # 🔹 3) Lineup API
 class LineupAPIView(APIView):
-    """Returns available channel lineup"""
+    """Returns available channel lineup.
+
+    Supports the following query parameters:
+    - format: 'ts' (default, MPEG-TS) or 'hls' (HLS output)
+              This mirrors the M3U playlist generation behavior.
+    """
 
     @swagger_auto_schema(
         operation_description="Retrieve the available channel lineup",
+        manual_parameters=[
+            openapi.Parameter(
+                'format',
+                openapi.IN_QUERY,
+                description="Output format: 'ts' (MPEG-TS, default) or 'hls' (HLS)",
+                type=openapi.TYPE_STRING,
+                enum=['ts', 'hls'],
+                default='ts'
+            ),
+        ],
         responses={200: openapi.Response("Channel Lineup JSON")},
     )
     def get(self, request, profile=None):
@@ -114,6 +129,11 @@ class LineupAPIView(APIView):
         else:
             channels = Channel.objects.all().order_by("channel_number")
 
+        # Get the output format: 'ts' (default MPEG-TS) or 'hls' (HLS output)
+        # This mirrors the M3U playlist generation logic in apps/output/views.py
+        output_format = request.GET.get('format', 'ts').lower()
+        use_hls_output = output_format == 'hls'
+
         lineup = []
         for ch in channels:
             # Format channel number as integer if it has no decimal component
@@ -125,11 +145,18 @@ class LineupAPIView(APIView):
             else:
                 formatted_channel_number = ""
 
+            # Determine the stream URL based on format
+            # This mirrors the M3U playlist generation logic
+            if use_hls_output:
+                stream_url = request.build_absolute_uri(f"/output/hls/{ch.uuid}/playlist.m3u8")
+            else:
+                stream_url = request.build_absolute_uri(f"/proxy/ts/stream/{ch.uuid}")
+
             lineup.append(
                 {
                     "GuideNumber": formatted_channel_number,
                     "GuideName": ch.name,
-                    "URL": request.build_absolute_uri(f"/proxy/ts/stream/{ch.uuid}"),
+                    "URL": stream_url,
                     "Guide_ID": formatted_channel_number,
                     "Station": formatted_channel_number,
                 }
