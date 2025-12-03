@@ -1230,7 +1230,7 @@ const SettingsPage = () => {
                     />
                     <Switch
                       label="Enable Low-Latency HLS (LL-HLS)"
-                      description="Experimental: Reduces latency but may increase CPU usage"
+                      description="Uses fMP4 segments for reduced latency. Note: Full LL-HLS benefits require HTTP/2 (via reverse proxy like nginx/caddy). Without HTTP/2, latency improvement is limited."
                       checked={hlsSettings.ll_hls_enabled}
                       onChange={(e) =>
                         setHlsSettings((prev) => ({

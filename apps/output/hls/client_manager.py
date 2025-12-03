@@ -892,13 +892,27 @@ class HLSClientManager:
                 logger.warning(f"No PID found in Redis for HLS channel {channel_uuid}")
 
             # Clean up HLS files AFTER confirming process is dead
-            channel_path = hls_config.get_channel_path(channel_uuid)
-            if os.path.exists(channel_path):
-                try:
-                    shutil.rmtree(channel_path)
-                    logger.info(f"Cleaned up HLS directory: {channel_path}")
-                except Exception as e:
-                    logger.error(f"Error cleaning up HLS directory {channel_path}: {e}")
+            # BUT FIRST: Check if a new session has started (race condition prevention)
+            # This can happen if automatic stream switch started a new FFmpeg process
+            # while we were killing the old one
+            new_pid_str = self.redis_client.hget(
+                self._get_channel_metadata_key(channel_uuid), "pid"
+            )
+            if new_pid_str and new_pid_str != pid_str:
+                # A new session has started - don't delete the directory!
+                logger.info(
+                    f"HLS channel {channel_uuid}: New session started (PID {new_pid_str}), "
+                    f"skipping directory cleanup"
+                )
+            else:
+                # No new session - safe to delete
+                channel_path = hls_config.get_channel_path(channel_uuid)
+                if os.path.exists(channel_path):
+                    try:
+                        shutil.rmtree(channel_path)
+                        logger.info(f"Cleaned up HLS directory: {channel_path}")
+                    except Exception as e:
+                        logger.error(f"Error cleaning up HLS directory {channel_path}: {e}")
 
             # Note: set_channel_inactive was already called at the start of this method
             # to prevent race conditions with the FFmpeg monitor thread

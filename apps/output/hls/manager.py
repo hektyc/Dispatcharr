@@ -532,9 +532,6 @@ class HLSChannelSession:
         logger.info(f"HLS {self.channel_uuid}: Building FFmpeg command with segment_duration={segment_duration}, playlist_size={playlist_size}, ll_hls={ll_hls_enabled}")
 
         playlist_path = os.path.join(self.output_path, "index.m3u8")
-        # Use %d instead of %05d to allow unlimited segment numbers (no 5-digit limit)
-        # This supports indefinite streaming without segment number overflow
-        segment_pattern = os.path.join(self.output_path, "index%d.ts")
         user_agent = self._get_user_agent()
 
         # Build HLS flags
@@ -542,9 +539,22 @@ class HLSChannelSession:
         # - append_list: Append to playlist instead of overwriting
         # - program_date_time: Add EXT-X-PROGRAM-DATE-TIME for better player sync
         hls_flags = "delete_segments+append_list+program_date_time"
+
+        # Determine segment extension based on LL-HLS mode
+        # LL-HLS uses fMP4 segments (.m4s), regular HLS uses MPEG-TS (.ts)
         if ll_hls_enabled:
             # LL-HLS requires additional flags for lower latency
             hls_flags += "+independent_segments"
+            segment_ext = "m4s"
+            logger.info(f"HLS {self.channel_uuid}: LL-HLS enabled - using fMP4 segments (.m4s)")
+            # Note: True LL-HLS requires HTTP/2 for server push. Without HTTP/2,
+            # the benefit is limited to slightly faster segment availability.
+        else:
+            segment_ext = "ts"
+
+        # Use %d instead of %05d to allow unlimited segment numbers (no 5-digit limit)
+        # This supports indefinite streaming without segment number overflow
+        segment_pattern = os.path.join(self.output_path, f"index%d.{segment_ext}")
 
         cmd = [
             "ffmpeg",
@@ -568,9 +578,8 @@ class HLSChannelSession:
             "-hls_segment_filename", segment_pattern,
         ]
 
-        # Add LL-HLS specific options
+        # Add LL-HLS specific options (fMP4 container format)
         if ll_hls_enabled:
-            # LL-HLS part files for lower latency
             cmd.extend([
                 "-hls_fmp4_init_filename", "init.mp4",
                 "-hls_segment_type", "fmp4",

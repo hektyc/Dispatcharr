@@ -67,6 +67,8 @@ const useSettingsStore = create(
       getChannelUrl: (channelUuid, baseUrl) => {
         const { streamFormat } = get();
         if (streamFormat === 'hls') {
+          // Use playlist.m3u8 which is the master playlist entry point
+          // This redirects to index.m3u8 (media playlist) internally
           return `${baseUrl}/output/hls/${channelUuid}/playlist.m3u8`;
         }
         return `${baseUrl}/proxy/ts/stream/${channelUuid}`;

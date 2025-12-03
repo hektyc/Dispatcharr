@@ -127,9 +127,11 @@ def hls_master_playlist(request, channel_uuid: str):
         hls_client_manager.update_client_activity(session_id, client_id)
 
         if session.playlist_exists:
-            # Segment format: index0.ts, index1.ts, etc.
-            segment_pattern = os.path.join(session.output_path, "index*.ts")
-            segments = glob.glob(segment_pattern)
+            # Segment format: index0.ts, index1.ts, etc. (or .m4s for LL-HLS fMP4)
+            # Check for both .ts and .m4s segments
+            ts_segments = glob.glob(os.path.join(session.output_path, "index*.ts"))
+            m4s_segments = glob.glob(os.path.join(session.output_path, "index*.m4s"))
+            segments = ts_segments + m4s_segments
 
             # Get current FFmpeg speed from session stats
             current_speed = session.get_stat('ffmpeg_speed', 0.0)
@@ -233,6 +235,9 @@ def hls_media_playlist(request, channel_uuid: str):
             # Match segment files: index0.ts, index1.ts, etc. (or .m4s for fmp4)
             if line.startswith("index") and (line.endswith(".ts") or line.endswith(".m4s")):
                 modified_lines.append(segment_base + line)
+            # Match init segment for fMP4/LL-HLS: init.mp4
+            elif line.strip() == "init.mp4":
+                modified_lines.append(segment_base + "init.mp4")
             else:
                 modified_lines.append(line)
 
