@@ -98,25 +98,10 @@ class DiscoverAPIView(APIView):
 
 # 🔹 3) Lineup API
 class LineupAPIView(APIView):
-    """Returns available channel lineup.
-
-    Supports the following query parameters:
-    - format: 'ts' (default, MPEG-TS) or 'hls' (HLS output)
-              This mirrors the M3U playlist generation behavior.
-    """
+    """Returns available channel lineup"""
 
     @swagger_auto_schema(
         operation_description="Retrieve the available channel lineup",
-        manual_parameters=[
-            openapi.Parameter(
-                'format',
-                openapi.IN_QUERY,
-                description="Output format: 'ts' (MPEG-TS, default) or 'hls' (HLS)",
-                type=openapi.TYPE_STRING,
-                enum=['ts', 'hls'],
-                default='ts'
-            ),
-        ],
         responses={200: openapi.Response("Channel Lineup JSON")},
     )
     def get(self, request, profile=None):
@@ -129,11 +114,6 @@ class LineupAPIView(APIView):
         else:
             channels = Channel.objects.all().order_by("channel_number")
 
-        # Get the output format: 'ts' (default MPEG-TS) or 'hls' (HLS output)
-        # This mirrors the M3U playlist generation logic in apps/output/views.py
-        output_format = request.GET.get('format', 'ts').lower()
-        use_hls_output = output_format == 'hls'
-
         lineup = []
         for ch in channels:
             # Format channel number as integer if it has no decimal component
@@ -145,18 +125,11 @@ class LineupAPIView(APIView):
             else:
                 formatted_channel_number = ""
 
-            # Determine the stream URL based on format
-            # This mirrors the M3U playlist generation logic
-            if use_hls_output:
-                stream_url = request.build_absolute_uri(f"/output/hls/{ch.uuid}/playlist.m3u8")
-            else:
-                stream_url = request.build_absolute_uri(f"/proxy/ts/stream/{ch.uuid}")
-
             lineup.append(
                 {
                     "GuideNumber": formatted_channel_number,
                     "GuideName": ch.name,
-                    "URL": stream_url,
+                    "URL": request.build_absolute_uri(f"/proxy/ts/stream/{ch.uuid}"),
                     "Guide_ID": formatted_channel_number,
                     "Station": formatted_channel_number,
                 }
@@ -197,6 +170,135 @@ class HDHRDeviceXMLAPIView(APIView):
         <root>
             <DeviceID>12345678</DeviceID>
             <FriendlyName>Dispatcharr HDHomeRun</FriendlyName>
+            <ModelNumber>HDTC-2US</ModelNumber>
+            <FirmwareName>hdhomerun3_atsc</FirmwareName>
+            <FirmwareVersion>20200101</FirmwareVersion>
+            <DeviceAuth>test_auth_token</DeviceAuth>
+            <BaseURL>{base_url}</BaseURL>
+            <LineupURL>{base_url}/lineup.json</LineupURL>
+        </root>"""
+
+        return HttpResponse(xml_response, content_type="application/xml")
+
+
+# ============================================================================
+# 🔹 HLS HDHR Endpoints
+# These endpoints mirror the standard HDHR endpoints but always return HLS URLs.
+# This allows HDHR clients (like Plex, Channels DVR) to receive HLS streams.
+# ============================================================================
+
+# 🔹 6) HLS Discover API
+class HLSDiscoverAPIView(APIView):
+    """Returns device discovery information for HLS HDHR endpoint"""
+
+    @swagger_auto_schema(
+        operation_description="Retrieve HDHomeRun device discovery information (HLS variant)",
+        responses={200: openapi.Response("HDHR HLS Discovery JSON")},
+    )
+    def get(self, request, profile=None):
+        uri_parts = ["hdhr-hls"]
+        if profile is not None:
+            uri_parts.append(profile)
+
+        base_url = request.build_absolute_uri(f'/{"/".join(uri_parts)}/').rstrip("/")
+        device = HDHRDevice.objects.first()
+
+        # Calculate tuner count using centralized function
+        from apps.m3u.utils import calculate_tuner_count
+        tuner_count = calculate_tuner_count(minimum=1, unlimited_default=10)
+
+        # Create a unique DeviceID for the HLS HDHomeRun device
+        device_ID = "12345678-hls"  # Default DeviceID with HLS suffix
+        friendly_name = "Dispatcharr HDHomeRun (HLS)"
+        if profile is not None:
+            device_ID = f"dispatcharr-hdhr-hls-{profile}"
+            friendly_name = f"Dispatcharr HDHomeRun (HLS) - {profile}"
+        if not device:
+            data = {
+                "FriendlyName": friendly_name,
+                "ModelNumber": "HDTC-2US",
+                "FirmwareName": "hdhomerun3_atsc",
+                "FirmwareVersion": "20200101",
+                "DeviceID": device_ID,
+                "DeviceAuth": "test_auth_token",
+                "BaseURL": base_url,
+                "LineupURL": f"{base_url}/lineup.json",
+                "TunerCount": tuner_count,
+            }
+        else:
+            data = {
+                "FriendlyName": f"{device.friendly_name} (HLS)",
+                "ModelNumber": "HDTC-2US",
+                "FirmwareName": "hdhomerun3_atsc",
+                "FirmwareVersion": "20200101",
+                "DeviceID": f"{device.device_id}-hls",
+                "DeviceAuth": "test_auth_token",
+                "BaseURL": base_url,
+                "LineupURL": f"{base_url}/lineup.json",
+                "TunerCount": tuner_count,
+            }
+        return JsonResponse(data)
+
+
+# 🔹 7) HLS Lineup API
+class HLSLineupAPIView(APIView):
+    """Returns available channel lineup with HLS URLs"""
+
+    @swagger_auto_schema(
+        operation_description="Retrieve the available channel lineup with HLS URLs",
+        responses={200: openapi.Response("Channel Lineup JSON (HLS)")},
+    )
+    def get(self, request, profile=None):
+        if profile is not None:
+            channel_profile = ChannelProfile.objects.get(name=profile)
+            channels = Channel.objects.filter(
+                channelprofilemembership__channel_profile=channel_profile,
+                channelprofilemembership__enabled=True,
+            ).order_by("channel_number")
+        else:
+            channels = Channel.objects.all().order_by("channel_number")
+
+        lineup = []
+        for ch in channels:
+            # Format channel number as integer if it has no decimal component
+            if ch.channel_number is not None:
+                if ch.channel_number == int(ch.channel_number):
+                    formatted_channel_number = str(int(ch.channel_number))
+                else:
+                    formatted_channel_number = str(ch.channel_number)
+            else:
+                formatted_channel_number = ""
+
+            # Always use HLS URL for this endpoint
+            stream_url = request.build_absolute_uri(f"/output/hls/{ch.uuid}/playlist.m3u8")
+
+            lineup.append(
+                {
+                    "GuideNumber": formatted_channel_number,
+                    "GuideName": ch.name,
+                    "URL": stream_url,
+                    "Guide_ID": formatted_channel_number,
+                    "Station": formatted_channel_number,
+                }
+            )
+        return JsonResponse(lineup, safe=False)
+
+
+# 🔹 8) HLS Device XML API
+class HLSHDHRDeviceXMLAPIView(APIView):
+    """Returns HDHomeRun device configuration in XML for HLS endpoint"""
+
+    @swagger_auto_schema(
+        operation_description="Retrieve the HDHomeRun device XML configuration (HLS variant)",
+        responses={200: openapi.Response("HDHR HLS Device XML")},
+    )
+    def get(self, request):
+        base_url = request.build_absolute_uri("/hdhr-hls/").rstrip("/")
+
+        xml_response = f"""<?xml version="1.0" encoding="utf-8"?>
+        <root>
+            <DeviceID>12345678-hls</DeviceID>
+            <FriendlyName>Dispatcharr HDHomeRun (HLS)</FriendlyName>
             <ModelNumber>HDTC-2US</ModelNumber>
             <FirmwareName>hdhomerun3_atsc</FirmwareName>
             <FirmwareVersion>20200101</FirmwareVersion>

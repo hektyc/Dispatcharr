@@ -1,6 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .api_views import HDHRDeviceViewSet, DiscoverAPIView, LineupAPIView, LineupStatusAPIView, HDHRDeviceXMLAPIView, hdhr_dashboard_view
+from .api_views import (
+    HDHRDeviceViewSet, DiscoverAPIView, LineupAPIView, LineupStatusAPIView,
+    HDHRDeviceXMLAPIView, hdhr_dashboard_view
+)
 
 app_name = 'hdhr'
 

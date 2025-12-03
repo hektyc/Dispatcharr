@@ -38,6 +38,9 @@ urlpatterns = [
     # HDHR
     path("hdhr", RedirectView.as_view(url="/hdhr/", permanent=True)),
     path("hdhr/", include(("apps.hdhr.urls", "hdhr"), namespace="hdhr")),
+    # HDHR-HLS (dedicated HLS endpoint - always returns HLS URLs)
+    path("hdhr-hls", RedirectView.as_view(url="/hdhr-hls/", permanent=True)),
+    path("hdhr-hls/", include("apps.hdhr.hls_urls", namespace="hdhr-hls")),
     # Add proxy apps - Move these before the catch-all
     path("proxy/", include(("apps.proxy.urls", "proxy"), namespace="proxy")),
     path("proxy", RedirectView.as_view(url="/proxy/", permanent=True)),
