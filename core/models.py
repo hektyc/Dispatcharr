@@ -185,8 +185,14 @@ class StreamProfile(models.Model):
         # Add HLS config placeholders if provided
         use_fmp4 = False
         if hls_config:
-            replacements["{segmentDuration}"] = str(hls_config.get("segment_duration", 6))
-            replacements["{playlistSize}"] = str(hls_config.get("playlist_size", 5))
+            segment_duration = hls_config.get("segment_duration", 6)
+            playlist_size = hls_config.get("playlist_size", 10)
+            replacements["{segmentDuration}"] = str(segment_duration)
+            replacements["{playlistSize}"] = str(playlist_size)
+            # Calculate delete_threshold based on playlist_size for better buffering
+            # Keep at least as many extra segments as are in the playlist
+            delete_threshold = max(3, playlist_size)
+            replacements["{deleteThreshold}"] = str(delete_threshold)
             # Determine segment extension based on fMP4 setting
             use_fmp4 = hls_config.get("use_fmp4_segments", False)
             segment_ext = "m4s" if use_fmp4 else "ts"

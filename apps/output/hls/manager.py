@@ -562,6 +562,11 @@ class HLSChannelSession:
         # This supports indefinite streaming without segment number overflow
         segment_pattern = os.path.join(self.output_path, f"index%d.{segment_ext}")
 
+        # Calculate delete_threshold based on playlist_size for better buffering
+        # Keep at least as many extra segments as are in the playlist
+        # This prevents clients from losing their buffer position during playback
+        delete_threshold = max(3, playlist_size)
+
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -580,7 +585,7 @@ class HLSChannelSession:
             "-hls_time", str(segment_duration),
             "-hls_list_size", str(playlist_size),
             "-hls_flags", hls_flags,
-            "-hls_delete_threshold", "3",  # Keep 3 extra segments before deletion
+            "-hls_delete_threshold", str(delete_threshold),  # Keep extra segments for buffer
             "-hls_segment_filename", segment_pattern,
         ]
 

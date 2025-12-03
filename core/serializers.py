@@ -106,27 +106,39 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
 
     Note: output_path is NOT included here - it's configured via the
     HLS_OUTPUT_PATH environment variable in docker-compose.yml or .env file.
+
+    Settings are intentionally flexible to support various user environments:
+    - segment_duration: 2-60 seconds (higher values for slow connections)
+    - playlist_size: 3-100 segments (higher values for longer buffer)
+    - retention_seconds: 0-86400 (up to 24 hours for DVR-like use cases)
+    - shutdown_delay: 15-300 seconds (minimum 15 for HDHR client stability)
     """
-    segment_duration = serializers.IntegerField(min_value=2, max_value=10, required=False, default=6)
-    playlist_size = serializers.IntegerField(min_value=3, max_value=10, required=False, default=5)
-    retention_seconds = serializers.IntegerField(min_value=0, max_value=3600, required=False, default=0)
+    segment_duration = serializers.IntegerField(min_value=2, max_value=60, required=False, default=6)
+    playlist_size = serializers.IntegerField(min_value=3, max_value=100, required=False, default=10)
+    retention_seconds = serializers.IntegerField(min_value=0, max_value=86400, required=False, default=0)
     ll_hls_enabled = serializers.BooleanField(required=False, default=False)
     use_fmp4_segments = serializers.BooleanField(required=False, default=False)
     shutdown_delay = serializers.IntegerField(min_value=15, max_value=300, required=False, default=30)
 
     def validate_segment_duration(self, value):
-        if value < 2 or value > 10:
-            raise serializers.ValidationError("Segment duration must be between 2 and 10 seconds")
+        if value < 2:
+            raise serializers.ValidationError("Segment duration must be at least 2 seconds")
+        if value > 60:
+            raise serializers.ValidationError("Segment duration cannot exceed 60 seconds")
         return value
 
     def validate_playlist_size(self, value):
-        if value < 3 or value > 10:
-            raise serializers.ValidationError("Playlist size must be between 3 and 10 segments")
+        if value < 3:
+            raise serializers.ValidationError("Playlist size must be at least 3 segments")
+        if value > 100:
+            raise serializers.ValidationError("Playlist size cannot exceed 100 segments")
         return value
 
     def validate_retention_seconds(self, value):
-        if value < 0 or value > 3600:
-            raise serializers.ValidationError("Retention must be between 0 and 3600 seconds (0 = immediate cleanup)")
+        if value < 0:
+            raise serializers.ValidationError("Retention cannot be negative")
+        if value > 86400:
+            raise serializers.ValidationError("Retention cannot exceed 86400 seconds (24 hours)")
         return value
 
     def validate_shutdown_delay(self, value):
@@ -135,10 +147,5 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
                 "Shutdown delay must be at least 15 seconds. HDHR clients like Plex need time to buffer before requesting segments."
             )
         if value > 300:
-            raise serializers.ValidationError("Shutdown delay must be at most 300 seconds")
-        return value
-
-    def validate_shutdown_delay(self, value):
-        if value < 0 or value > 300:
-            raise serializers.ValidationError("Shutdown delay must be between 0 and 300 seconds")
+            raise serializers.ValidationError("Shutdown delay cannot exceed 300 seconds")
         return value

@@ -25,7 +25,7 @@ class HLSConfig:
     # Default settings
     DEFAULT_OUTPUT_PATH = "/data/hls"
     DEFAULT_SEGMENT_DURATION = 6  # seconds
-    DEFAULT_PLAYLIST_SIZE = 5  # number of segments in playlist
+    DEFAULT_PLAYLIST_SIZE = 10  # number of segments in playlist (10 * 6s = 60s buffer)
     DEFAULT_RETENTION_SECONDS = 0  # 0 = delete immediately when channel stops
 
     def __init__(self):

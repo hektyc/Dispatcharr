@@ -201,7 +201,7 @@ const SettingsPage = () => {
   const [hlsSettings, setHlsSettings] = useState({
     output_path: '/data/hls',
     segment_duration: 6,
-    playlist_size: 5,
+    playlist_size: 10,
     retention_seconds: 0,
     ll_hls_enabled: false,
     use_fmp4_segments: false,
@@ -449,7 +449,11 @@ const SettingsPage = () => {
     try {
       // Exclude output_path from save - it's read-only from environment variable
       const { output_path, ...settingsToSave } = hlsSettings;
-      await API.updateHLSSettings(settingsToSave);
+      const response = await API.updateHLSSettings(settingsToSave);
+      // Update local state with server response to ensure consistency
+      if (response) {
+        setHlsSettings(response);
+      }
       setHlsSettingsSaved(true);
       notifications.show({
         title: 'HLS Settings Saved',
@@ -1191,8 +1195,8 @@ const SettingsPage = () => {
                       max={300}
                     />
                     <NumberInput
-                      label="Segment Duration"
-                      description="Duration of each HLS segment in seconds (2-10)"
+                      label="Segment Duration (seconds)"
+                      description="Duration of each HLS segment in seconds. Default: 6. Higher values (10-30) can help with unstable connections."
                       value={hlsSettings.segment_duration}
                       onChange={(value) =>
                         setHlsSettings((prev) => ({
@@ -1201,11 +1205,11 @@ const SettingsPage = () => {
                         }))
                       }
                       min={2}
-                      max={10}
+                      max={60}
                     />
                     <NumberInput
-                      label="Playlist Size"
-                      description="Number of segments to keep in the playlist (3-10)"
+                      label="Playlist Size (segments)"
+                      description="Number of segments to keep in the playlist. Default: 10 (60s buffer at 6s segments). Higher values provide longer buffer for clients."
                       value={hlsSettings.playlist_size}
                       onChange={(value) =>
                         setHlsSettings((prev) => ({
@@ -1214,11 +1218,11 @@ const SettingsPage = () => {
                         }))
                       }
                       min={3}
-                      max={10}
+                      max={100}
                     />
                     <NumberInput
                       label="Retention (seconds)"
-                      description="How long to keep segments after removal from playlist. 0 = immediate cleanup."
+                      description="How long to keep segments after removal from playlist. 0 = immediate cleanup. Max: 86400 (24 hours)."
                       value={hlsSettings.retention_seconds}
                       onChange={(value) =>
                         setHlsSettings((prev) => ({
@@ -1227,7 +1231,7 @@ const SettingsPage = () => {
                         }))
                       }
                       min={0}
-                      max={3600}
+                      max={86400}
                     />
                     <Switch
                       label="Use fMP4 Segments"
