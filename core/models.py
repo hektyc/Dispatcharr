@@ -52,7 +52,7 @@ class StreamProfile(models.Model):
         blank=True,
     )
     parameters = models.TextField(
-        help_text="Command-line parameters. Use {userAgent}, {streamUrl}, and {hlsOutputPath} as placeholders.",
+        help_text="Command-line parameters. Placeholders: {userAgent}, {streamUrl}, {hlsOutputPath}, {segmentDuration}, {playlistSize}, {segmentExtension}",
         blank=True,
     )
     profile_type = models.CharField(
@@ -165,7 +165,7 @@ class StreamProfile(models.Model):
             stream_url: The stream URL to process
             user_agent: The user agent string
             hls_output_path: Path to HLS output directory (required for HLS profiles)
-            hls_config: Dict with HLS settings (segment_duration, playlist_size, etc.)
+            hls_config: Dict with HLS settings (segment_duration, playlist_size, use_fmp4_segments, etc.)
 
         Returns:
             List of command arguments, or empty list for proxy profiles
@@ -183,15 +183,32 @@ class StreamProfile(models.Model):
             replacements["{hlsOutputPath}"] = hls_output_path
 
         # Add HLS config placeholders if provided
+        use_fmp4 = False
         if hls_config:
             replacements["{segmentDuration}"] = str(hls_config.get("segment_duration", 6))
             replacements["{playlistSize}"] = str(hls_config.get("playlist_size", 5))
+            # Determine segment extension based on fMP4 setting
+            use_fmp4 = hls_config.get("use_fmp4_segments", False)
+            segment_ext = "m4s" if use_fmp4 else "ts"
+            replacements["{segmentExtension}"] = segment_ext
 
         # Split the command and iterate through each part to apply replacements
         cmd = [self.command] + [
             self._replace_in_part(part, replacements)
             for part in self.parameters.split()
         ]
+
+        # For HLS profiles using fMP4 segments, add required fMP4 options
+        # These must be added dynamically because they're not just placeholders
+        if self.is_hls_profile() and use_fmp4:
+            # Find the position to insert fMP4 options (before output playlist path)
+            # Insert AAC bitstream filter for converting ADTS to ASC (required for MP4 container)
+            # Insert fMP4-specific HLS options
+            cmd.extend([
+                "-bsf:a", "aac_adtstoasc",  # Convert AAC ADTS to ASC for MP4 container
+                "-hls_fmp4_init_filename", "init.mp4",
+                "-hls_segment_type", "fmp4",
+            ])
 
         return cmd
 

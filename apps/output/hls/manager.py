@@ -448,12 +448,15 @@ class HLSChannelSession:
 
         Uses the channel's HLS stream profile if available, otherwise falls back
         to the default HLS FFmpeg profile. The profile's command and parameters
-        are used with placeholder substitution for {streamUrl}, {userAgent}, and
-        {hlsOutputPath}.
+        are used with placeholder substitution for {streamUrl}, {userAgent},
+        {hlsOutputPath}, {segmentDuration}, {playlistSize}, and {segmentExtension}.
 
         For HLS Proxy profile:
-        - If source is already HLS (.m3u8): Use passthrough (TODO: implement HLS proxy)
-        - If source is MPEG-TS or other format: Use fallback remux command to convert to HLS
+        - Returns fallback command since Proxy profile returns empty (no command)
+
+        For HLS FFmpeg profile:
+        - Uses build_command() with full HLS config including fMP4 settings
+        - The profile uses {segmentExtension} placeholder for dynamic .ts/.m4s
 
         Returns:
             List of command arguments for FFmpeg
@@ -465,27 +468,27 @@ class HLSChannelSession:
             logger.warning(f"No HLS profile found for {self.channel_uuid}, using fallback")
             return self._build_fallback_command()
 
-        # Check if this is a locked HLS profile (Proxy or FFmpeg)
-        # Both use the fallback command to ensure dynamic segment format support
-        if profile.is_hls_proxy() or profile.is_hls_ffmpeg():
+        # HLS Proxy returns empty command - use fallback for actual streaming
+        if profile.is_hls_proxy():
             if self._is_source_hls():
                 logger.info(f"HLS {profile.name}: source is HLS for {self.channel_uuid}, using remux")
             else:
                 logger.info(f"HLS {profile.name}: source is MPEG-TS for {self.channel_uuid}, using remux")
-
-            # Use fallback command which supports dynamic segment format (fMP4/TS)
             return self._build_fallback_command()
 
         # Get user agent
         user_agent = self._get_user_agent()
 
         # Build HLS config dict for placeholder substitution
+        # Include use_fmp4_segments for dynamic segment extension
+        use_fmp4 = hls_config.use_fmp4_segments  # Includes LL-HLS check
         hls_config_dict = {
             "segment_duration": hls_config.segment_duration,
             "playlist_size": hls_config.playlist_size,
+            "use_fmp4_segments": use_fmp4,
         }
 
-        logger.info(f"HLS {self.channel_uuid}: Building command from profile '{profile.name}' with segment_duration={hls_config_dict['segment_duration']}, playlist_size={hls_config_dict['playlist_size']}")
+        logger.info(f"HLS {self.channel_uuid}: Building command from profile '{profile.name}' with segment_duration={hls_config_dict['segment_duration']}, playlist_size={hls_config_dict['playlist_size']}, fmp4={use_fmp4}")
 
         # Build command using profile
         try:
