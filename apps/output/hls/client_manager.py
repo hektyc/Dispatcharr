@@ -759,9 +759,12 @@ class HLSClientManager:
                     client_count = self.redis_client.scard(clients_key) or 0
 
                     if client_count > 0:
-                        # Channel has active clients - refresh last_activity and skip
-                        metadata_key = self._get_channel_metadata_key(channel_uuid)
-                        self.redis_client.hset(metadata_key, "last_activity", str(current_time))
+                        # Channel has active clients - skip cleanup
+                        # NOTE: We do NOT refresh last_activity here. The last_activity
+                        # is only updated when actual client requests come in (add_client,
+                        # update_client_activity). This ensures that when a client stops
+                        # watching, the shutdown_delay timer starts from the last actual
+                        # request, not from when the cleanup loop runs.
                         continue
 
                     # No clients - check how long since last activity
