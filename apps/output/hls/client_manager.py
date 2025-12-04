@@ -119,26 +119,30 @@ class HLSClientManager:
         """
         Get the TTL for client keys in Redis.
 
-        This should be just long enough for clients to survive between segment requests.
-        HLS clients request segments every segment_duration seconds, so we use:
-        segment_duration + a small buffer.
+        This should be long enough for clients to survive between segment requests,
+        accounting for network delays, buffering, and player behavior.
 
-        IMPORTANT: For instant TTL to work, this should be as short as possible
-        while still allowing clients to survive between segment requests.
-        The shutdown_delay timer only starts AFTER client keys expire.
+        HLS clients typically request segments every segment_duration seconds, but:
+        - Players may buffer multiple segments before requesting more
+        - Network delays can cause gaps between requests
+        - Some players request segments in bursts
+
+        We use segment_duration * 3 to provide a robust buffer that prevents
+        premature client expiration while still allowing reasonable cleanup times.
+
+        The shutdown_delay timer only starts AFTER client keys expire AND
+        no new requests come in.
 
         Total time before shutdown = client_ttl + shutdown_delay
 
-        For a 3-second shutdown_delay with 6-second segments:
-        - client_ttl = 6 + 2 = 8 seconds
-        - Total = 8 + 3 = 11 seconds after last request
-
-        To minimize this, we use segment_duration + 1 second buffer.
+        For a 30-second shutdown_delay with 10-second segments:
+        - client_ttl = 10 * 3 = 30 seconds
+        - Total = 30 + 30 = 60 seconds after last request
         """
         from apps.output.hls.config import hls_config
         segment_duration = hls_config.segment_duration or 6
-        # Use minimal buffer (1 second) for faster TTL response
-        return segment_duration + 1
+        # Use 3x segment duration for robust client tracking
+        return segment_duration * 3
 
     def add_client(self, channel_uuid: str, client_id: str, client_ip: str,
                    user_agent: str = None) -> bool:

@@ -3,6 +3,8 @@ import os
 import json
 import logging
 import stat
+import time
+import threading
 from django.conf import settings as django_settings
 
 logger = logging.getLogger(__name__)
@@ -18,8 +20,8 @@ class HLSConfig:
     (set in docker-compose.yml or .env file). This ensures the path is configured
     at container startup when volume mounts are defined.
 
-    Other settings are read fresh from the database to support multi-worker
-    uwsgi environments.
+    Settings are cached in memory with a short TTL to reduce database queries
+    while still supporting multi-worker uwsgi environments.
     """
 
     # Default settings
@@ -27,46 +29,65 @@ class HLSConfig:
     DEFAULT_SEGMENT_DURATION = 6  # seconds
     DEFAULT_PLAYLIST_SIZE = 10  # number of segments in playlist (10 * 6s = 60s buffer)
     DEFAULT_RETENTION_SECONDS = 0  # 0 = delete immediately when channel stops
+    DEFAULT_SHUTDOWN_DELAY = 30  # seconds - longer than TS proxy due to segment-based nature
+
+    # Cache settings
+    CACHE_TTL = 5  # seconds - how long to cache settings before refreshing from database
 
     def __init__(self):
-        # Output path is read fresh from environment on each access
-        # This ensures changes to the environment are picked up
-        pass
+        # Settings cache
+        self._settings_cache = None
+        self._cache_timestamp = 0
+        self._cache_lock = threading.Lock()
 
     def _load_settings(self):
-        """Load HLS settings from CoreSettings.
+        """Load HLS settings from CoreSettings with caching.
 
-        Always reads fresh from database to support multi-worker environments.
+        Uses a short TTL cache to reduce database queries while still
+        supporting multi-worker environments. Settings are refreshed
+        every CACHE_TTL seconds.
+
         Note: output_path is NOT included here - it comes from environment variable.
         """
+        current_time = time.time()
+
+        # Check if cache is still valid
+        with self._cache_lock:
+            if self._settings_cache is not None and (current_time - self._cache_timestamp) < self.CACHE_TTL:
+                return self._settings_cache
+
+        # Cache expired or not set - load from database
         try:
             from core.models import CoreSettings, HLS_OUTPUT_SETTINGS_KEY
-            # Log the key we're looking for
-            logger.info(f"Looking for HLS settings with key: '{HLS_OUTPUT_SETTINGS_KEY}'")
 
             settings_obj = CoreSettings.objects.filter(key=HLS_OUTPUT_SETTINGS_KEY).first()
             if settings_obj:
                 raw_value = settings_obj.value
-                logger.info(f"Found HLS settings in database: key='{settings_obj.key}', raw_value='{raw_value}'")
                 settings = json.loads(raw_value)
-                logger.info(f"Parsed HLS settings: {settings}")
-                return settings
+                logger.debug(f"Loaded HLS settings from database: {settings}")
             else:
-                # Log all CoreSettings keys to help debug
-                all_keys = list(CoreSettings.objects.values_list('key', flat=True))
-                logger.warning(f"HLS settings not found in database. Available keys: {all_keys}")
-                return {}
+                logger.debug("HLS settings not found in database, using defaults")
+                settings = {}
+
+            # Update cache
+            with self._cache_lock:
+                self._settings_cache = settings
+                self._cache_timestamp = current_time
+
+            return settings
         except Exception as e:
             logger.error(f"Could not load HLS settings: {e}", exc_info=True)
-            return {}
+            return self._settings_cache if self._settings_cache else {}
 
     def _invalidate_cache(self):
         """Invalidate cached settings.
 
-        This is kept for API compatibility but no longer does anything
-        since settings are always read fresh from the database.
+        Call this after saving settings to ensure the next read gets fresh data.
         """
-        pass
+        with self._cache_lock:
+            self._settings_cache = None
+            self._cache_timestamp = 0
+        logger.debug("HLS settings cache invalidated")
 
     @property
     def output_path(self):
