@@ -1,9 +1,13 @@
 # core/serializers.py
 import json
 import ipaddress
+import re
+import logging
 
 from rest_framework import serializers
-from .models import CoreSettings, UserAgent, StreamProfile, NETWORK_ACCESS
+from .models import CoreSettings, UserAgent, StreamProfile, NETWORK_ACCESS, PROFILE_TYPE_HLS
+
+logger = logging.getLogger(__name__)
 
 
 class UserAgentSerializer(serializers.ModelSerializer):
@@ -21,6 +25,8 @@ class UserAgentSerializer(serializers.ModelSerializer):
 
 
 class StreamProfileSerializer(serializers.ModelSerializer):
+    """Serializer for StreamProfile with comprehensive validation for HLS profiles."""
+
     class Meta:
         model = StreamProfile
         fields = [
@@ -33,6 +39,111 @@ class StreamProfileSerializer(serializers.ModelSerializer):
             "user_agent",
             "locked",
         ]
+
+    # Known invalid FFmpeg options that users commonly try to use
+    INVALID_FFMPEG_OPTIONS = {
+        "-hls_format": {
+            "message": "'-hls_format' is not a valid FFmpeg option.",
+            "fix": "Use '-hls_segment_type fmp4' instead of '-hls_format fmp4'. "
+                   "Note: When fMP4/LL-HLS is enabled in HLS Settings, Dispatcharr automatically "
+                   "adds the fMP4 options, so you don't need to include them in your profile."
+        },
+    }
+
+    # Options that Dispatcharr adds automatically when fMP4/LL-HLS is enabled
+    AUTO_ADDED_FMP4_OPTIONS = [
+        "-hls_segment_type fmp4",
+        "-hls_fmp4_init_filename",
+        "-bsf:a aac_adtstoasc",
+    ]
+
+    def validate_parameters(self, value):
+        """Validate the parameters field for common FFmpeg errors."""
+        if not value:
+            return value
+
+        errors = []
+        warnings = []
+
+        # Check for invalid FFmpeg options
+        for invalid_opt, info in self.INVALID_FFMPEG_OPTIONS.items():
+            if invalid_opt in value:
+                errors.append(f"❌ {info['message']}\n\n💡 How to fix: {info['fix']}")
+
+        # Check for spaces before '+' in option values (common mistake with -hls_flags)
+        # Pattern: looks for "-option_name value +something" where there's a space before +
+        space_before_plus = re.findall(r'(-[a-z_]+)\s+([^\s]+)\s+(\+[a-z_]+)', value, re.IGNORECASE)
+        for match in space_before_plus:
+            option_name, first_value, plus_value = match
+            if option_name in ['-hls_flags', '-fflags', '-movflags']:
+                errors.append(
+                    f"❌ Invalid space before '{plus_value}' in '{option_name}' option.\n\n"
+                    f"FFmpeg interprets '{plus_value}' as a separate unknown option because of the space.\n\n"
+                    f"💡 How to fix: Remove the space. Change:\n"
+                    f"   {option_name} {first_value} {plus_value}\n"
+                    f"To:\n"
+                    f"   {option_name} {first_value}{plus_value}"
+                )
+
+        # Check for fMP4 options that Dispatcharr adds automatically
+        for auto_opt in self.AUTO_ADDED_FMP4_OPTIONS:
+            if auto_opt in value:
+                warnings.append(
+                    f"⚠️ '{auto_opt}' is included in your profile, but Dispatcharr adds this automatically "
+                    f"when fMP4/LL-HLS is enabled in Settings → HLS.\n\n"
+                    f"💡 Recommendation: Remove '{auto_opt}' from your profile to avoid duplicate options. "
+                    f"Enable 'Use fMP4 Segments' or 'Enable LL-HLS' in HLS Settings instead."
+                )
+
+        # Check for required placeholders in HLS profiles
+        profile_type = self.initial_data.get('profile_type', 'ts')
+        if profile_type == 'hls':
+            required_placeholders = ['{streamUrl}', '{hlsOutputPath}']
+            missing = [p for p in required_placeholders if p not in value]
+            if missing:
+                errors.append(
+                    f"❌ Missing required placeholder(s): {', '.join(missing)}\n\n"
+                    f"💡 HLS profiles must include these placeholders:\n"
+                    f"   • {{streamUrl}} - The input stream URL\n"
+                    f"   • {{hlsOutputPath}} - The output directory for HLS files\n\n"
+                    f"Optional placeholders:\n"
+                    f"   • {{userAgent}} - User agent string\n"
+                    f"   • {{segmentDuration}} - Segment duration from HLS settings\n"
+                    f"   • {{playlistSize}} - Playlist size from HLS settings\n"
+                    f"   • {{segmentExtension}} - Segment file extension (ts or m4s)"
+                )
+
+            # Check for -i flag position (should come after input options)
+            if '-i' in value:
+                # Check if there are options after -i that should be before it
+                before_i, after_i = value.split('-i', 1)
+                input_options = ['-fflags', '-analyzeduration', '-probesize', '-user_agent', '-headers']
+                misplaced = [opt for opt in input_options if opt in after_i.split('{streamUrl}')[0] if '{streamUrl}' in after_i]
+                if misplaced:
+                    errors.append(
+                        f"❌ Input option(s) {', '.join(misplaced)} should be placed BEFORE '-i {{streamUrl}}'.\n\n"
+                        f"💡 How to fix: Move these options before the -i flag. FFmpeg processes options "
+                        f"in order, and input options must come before the input file."
+                    )
+
+        # Raise errors if any found
+        if errors:
+            raise serializers.ValidationError("\n\n".join(errors))
+
+        # Log warnings but don't block save
+        for warning in warnings:
+            logger.warning(f"StreamProfile validation warning: {warning}")
+
+        return value
+
+    def validate(self, data):
+        """Cross-field validation."""
+        # Don't validate locked profiles
+        if self.instance and self.instance.locked:
+            return data
+
+        # Additional validation can be added here
+        return data
 
 
 class CoreSettingsSerializer(serializers.ModelSerializer):
