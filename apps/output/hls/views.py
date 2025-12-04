@@ -197,6 +197,11 @@ def hls_media_playlist(request, channel_uuid: str):
     workers. Instead of checking session state, we check if the playlist file
     exists on disk. This allows any worker to serve the playlist regardless of
     which worker started the FFmpeg process.
+
+    If the playlist doesn't exist and no session is active, this view will
+    attempt to start a session (same as hls_master_playlist). This handles
+    cases where clients request index.m3u8 directly or when the session was
+    cleaned up between requests.
     """
     if not network_access_allowed(request, "STREAMS"):
         return HttpResponse("Forbidden", status=403)
@@ -212,13 +217,74 @@ def hls_media_playlist(request, channel_uuid: str):
     # is still creating the playlist. Without this, the session could be
     # killed after shutdown_delay seconds because no clients are registered.
     client_id = _get_client_id(request)
-    hls_client_manager.update_client_activity(channel_uuid, client_id)
+    activity_updated = hls_client_manager.update_client_activity(channel_uuid, client_id)
 
     # Check if playlist file exists on disk
     if not os.path.exists(playlist_path):
-        # Playlist doesn't exist - might need to start session
-        # Return 503 to tell client to retry
-        return HttpResponse("Playlist not ready", status=503)
+        # Playlist doesn't exist - check if we need to start a session
+        if not activity_updated:
+            # Channel is not active - try to start a session
+            # This handles cases where the session was cleaned up or never started
+            logger.info(f"HLS {channel_uuid}: No active session, attempting to start from media playlist request")
+
+            # Get channel or stream by UUID
+            channel_or_stream, session_id = get_channel_or_stream(channel_uuid)
+
+            if channel_or_stream is None:
+                return HttpResponseNotFound("Channel or stream not found")
+
+            # Get direct stream URL based on object type
+            if isinstance(channel_or_stream, Channel):
+                channel = channel_or_stream
+                stream_url, user_agent = get_direct_stream_url(channel)
+                if not stream_url:
+                    return HttpResponse("No stream available for this channel", status=503)
+
+                # Start HLS session
+                session = hls_manager.get_or_start_session(
+                    session_id,
+                    stream_url,
+                    user_agent=user_agent,
+                    channel=channel
+                )
+            else:
+                stream = channel_or_stream
+                stream_url, user_agent = get_direct_stream_url_for_stream(stream)
+                if not stream_url:
+                    return HttpResponse("No stream URL available", status=503)
+
+                session = hls_manager.get_or_start_session(
+                    session_id,
+                    stream_url,
+                    user_agent=user_agent,
+                    channel=None
+                )
+
+            if not session:
+                return HttpResponse("Failed to start HLS output", status=500)
+
+            # Track client connection
+            client_ip = _get_client_ip(request)
+            client_user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown')
+            hls_client_manager.add_client(session_id, client_id, client_ip, client_user_agent)
+
+            # Wait for playlist to be ready (up to 15 seconds)
+            for _ in range(150):
+                hls_client_manager.update_client_activity(session_id, client_id)
+                if os.path.exists(playlist_path):
+                    # Check for segments too
+                    ts_segments = glob.glob(os.path.join(hls_config.get_channel_path(channel_uuid), "index*.ts"))
+                    m4s_segments = glob.glob(os.path.join(hls_config.get_channel_path(channel_uuid), "index*.m4s"))
+                    if len(ts_segments) + len(m4s_segments) >= 3:
+                        break
+                time.sleep(0.1)
+
+            # Re-check if playlist exists after waiting
+            if not os.path.exists(playlist_path):
+                return HttpResponse("Playlist not ready", status=503)
+        else:
+            # Channel is active but playlist doesn't exist yet - just wait
+            return HttpResponse("Playlist not ready", status=503)
 
     # Read and modify playlist to use absolute URLs
     try:
