@@ -601,16 +601,32 @@ class HLSChannelSession:
             # Note: No reconnect flags - Dispatcharr core handles reconnection
             "-user_agent", user_agent,
             # Input buffer to handle source instability (prevents short freezes)
-            "-fflags", "+genpts+discardcorrupt",
+            # +igndts: Ignore DTS (decode timestamp) when PTS is available - prevents
+            #          timestamp issues when source has inconsistent DTS values
+            "-fflags", "+genpts+discardcorrupt+igndts",
             "-analyzeduration", "5000000",  # 5 seconds to analyze input
             "-probesize", "5000000",  # 5MB probe size
             "-i", self.stream_url,
-            # Output options
+            # Output options - Enterprise-level flags for smooth channel transitions
             "-c", "copy",  # Copy without re-encoding
+            # Timestamp handling for seamless stream switches:
+            # -copyts: Copy timestamps from input without modification
+            # -start_at_zero: Start output timestamps at zero (with copyts)
+            # -avoid_negative_ts make_zero: Shift negative timestamps to zero
+            "-copyts",
+            "-start_at_zero",
+            "-avoid_negative_ts", "make_zero",
+            # Reduce muxing delay for faster segment availability
+            "-max_delay", "0",
+            # HLS muxer options
             "-f", "hls",
             "-hls_time", str(segment_duration),
             "-hls_list_size", str(playlist_size),
             "-hls_flags", hls_flags,
+            # Prevent client caching issues during channel changes
+            "-hls_allow_cache", "0",
+            # Use epoch-based segment numbering for unique numbers across restarts
+            "-hls_start_number_source", "epoch",
             "-hls_segment_filename", segment_pattern,
         ]
 
