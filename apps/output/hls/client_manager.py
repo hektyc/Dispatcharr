@@ -175,12 +175,17 @@ class HLSClientManager:
             # Track in Redis
             if self.redis_client:
                 current_time = str(time.time())
-                
+
                 # Add to client set
                 clients_key = self._get_channel_clients_key(channel_uuid)
                 client_ttl = self._get_client_ttl()
                 self.redis_client.sadd(clients_key, client_id)
-                self.redis_client.expire(clients_key, client_ttl)
+                # Only extend TTL if needed - don't overwrite a longer grace period TTL
+                # This prevents the synthetic session client's grace period from being
+                # shortened when real clients start making requests
+                current_ttl = self.redis_client.ttl(clients_key)
+                if current_ttl < client_ttl:
+                    self.redis_client.expire(clients_key, client_ttl)
 
                 # Store client metadata
                 client_key = self._get_client_key(channel_uuid, client_id)
@@ -269,7 +274,12 @@ class HLSClientManager:
                 # Ensure client is in the set (re-add in case it expired)
                 clients_key = self._get_channel_clients_key(channel_uuid)
                 self.redis_client.sadd(clients_key, client_id)
-                self.redis_client.expire(clients_key, client_ttl)
+                # Only extend TTL if needed - don't overwrite a longer grace period TTL
+                # This prevents the synthetic session client's grace period from being
+                # shortened when real clients start making requests
+                current_ttl = self.redis_client.ttl(clients_key)
+                if current_ttl < client_ttl:
+                    self.redis_client.expire(clients_key, client_ttl)
 
                 # Update client last_active
                 client_key = self._get_client_key(channel_uuid, client_id)
