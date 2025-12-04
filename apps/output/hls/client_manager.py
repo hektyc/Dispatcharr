@@ -299,7 +299,12 @@ class HLSClientManager:
             return 0
 
     def get_all_hls_channels(self) -> list:
-        """Get info for all active HLS channels."""
+        """Get info for all active HLS channels.
+
+        Only returns channels that have an active FFmpeg process.
+        This prevents stale channels from appearing in the Active Connections UI
+        after cleanup has been initiated but before all data sources refresh.
+        """
         channels = []
         try:
             if self.redis_client:
@@ -318,6 +323,16 @@ class HLSClientManager:
                         parts = key.split(":")
                         if len(parts) >= 4:
                             channel_uuid = parts[2]
+
+                            # CRITICAL: Verify the channel is truly active before including
+                            # This prevents race conditions where metadata exists but the
+                            # session is being cleaned up
+                            if not self._is_channel_truly_active(channel_uuid):
+                                logger.debug(f"HLS channel {channel_uuid} has metadata but is not truly active - skipping and cleaning up")
+                                # Clean up the orphaned keys to prevent them from reappearing
+                                self._cleanup_orphaned_channel(channel_uuid)
+                                continue
+
                             channel_info = self._get_channel_info(channel_uuid)
                             if channel_info:
                                 channels.append(channel_info)
@@ -329,6 +344,105 @@ class HLSClientManager:
             logger.error(f"Error getting HLS channels: {e}")
 
         return channels
+
+    def _is_channel_truly_active(self, channel_uuid: str) -> bool:
+        """Check if an HLS channel is truly active (not stale/orphaned).
+
+        A channel is considered truly active if:
+        1. The owner key exists (session has an owner)
+        2. The metadata key exists
+        3. The PID in metadata corresponds to a running process
+
+        This helps prevent stale channels from appearing in the UI during
+        the cleanup process when there may be timing gaps between different
+        data sources (WebSocket, API polling, Celery beat).
+        """
+        try:
+            if not self.redis_client:
+                return False
+
+            # Check owner key exists
+            owner_key = f"{self.CHANNEL_KEY_PREFIX}{channel_uuid}:owner"
+            if not self.redis_client.exists(owner_key):
+                logger.debug(f"HLS channel {channel_uuid}: no owner key - not truly active")
+                return False
+
+            # Check metadata exists
+            metadata_key = self._get_channel_metadata_key(channel_uuid)
+            if not self.redis_client.exists(metadata_key):
+                logger.debug(f"HLS channel {channel_uuid}: no metadata key - not truly active")
+                return False
+
+            # Check if PID is still running (most reliable indicator)
+            pid_str = self.redis_client.hget(metadata_key, "pid")
+            if pid_str:
+                try:
+                    import os
+                    pid = int(pid_str)
+                    # os.kill with signal 0 checks if process exists without killing it
+                    os.kill(pid, 0)
+                    # Process exists - channel is truly active
+                    return True
+                except (OSError, ValueError):
+                    # Process doesn't exist or PID is invalid
+                    logger.debug(f"HLS channel {channel_uuid}: PID {pid_str} not running - not truly active")
+                    return False
+
+            # No PID stored - assume not active
+            logger.debug(f"HLS channel {channel_uuid}: no PID in metadata - not truly active")
+            return False
+
+        except Exception as e:
+            logger.debug(f"Error checking if HLS channel {channel_uuid} is truly active: {e}")
+            return False
+
+    def _cleanup_orphaned_channel(self, channel_uuid: str):
+        """Clean up Redis keys for an orphaned HLS channel.
+
+        Called when we detect a channel that has metadata but is not truly active
+        (e.g., FFmpeg process is not running). This provides a self-healing mechanism
+        to prevent stale channels from appearing in the UI.
+
+        This is a lightweight cleanup - it only deletes Redis keys, not files.
+        """
+        try:
+            if not self.redis_client:
+                return
+
+            # Collect all keys to delete
+            keys_to_delete = []
+
+            # Metadata key
+            metadata_key = self._get_channel_metadata_key(channel_uuid)
+            keys_to_delete.append(metadata_key)
+
+            # Owner key
+            owner_key = f"{self.CHANNEL_KEY_PREFIX}{channel_uuid}:owner"
+            keys_to_delete.append(owner_key)
+
+            # Clients set key and individual client keys
+            clients_key = self._get_channel_clients_key(channel_uuid)
+            client_ids = self.redis_client.smembers(clients_key) or set()
+            keys_to_delete.append(clients_key)
+
+            for client_id in client_ids:
+                client_key = self._get_client_key(channel_uuid, client_id)
+                keys_to_delete.append(client_key)
+
+            # Cleanup lock key
+            cleanup_lock_key = self._get_cleanup_lock_key(channel_uuid)
+            keys_to_delete.append(cleanup_lock_key)
+
+            # Delete all keys atomically
+            if keys_to_delete:
+                pipeline = self.redis_client.pipeline()
+                for key in keys_to_delete:
+                    pipeline.delete(key)
+                pipeline.execute()
+                logger.info(f"Cleaned up {len(keys_to_delete)} orphaned Redis keys for HLS channel {channel_uuid}")
+
+        except Exception as e:
+            logger.debug(f"Error cleaning up orphaned HLS channel {channel_uuid}: {e}")
 
     def _get_channel_info(self, channel_uuid: str) -> Optional[dict]:
         """Get detailed info for a channel including clients and stream info."""
