@@ -273,8 +273,10 @@ class HLSClientManager:
                 self.redis_client.expire(client_key, client_ttl)
 
                 # Update channel metadata last_activity
+                # IMPORTANT: Use client_ttl * 10 to match set_channel_active() and add_client()
+                # Previously this was client_ttl * 2 which caused premature TTL expiration
                 self.redis_client.hset(metadata_key, "last_activity", current_time)
-                self.redis_client.expire(metadata_key, client_ttl * 2)
+                self.redis_client.expire(metadata_key, client_ttl * 10)
 
             return True
         except Exception as e:

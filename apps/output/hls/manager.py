@@ -525,6 +525,12 @@ class HLSChannelSession:
         Note: Reconnect flags are NOT included here because Dispatcharr's core
         logic handles stream reconnection at a higher level. Having FFmpeg's
         reconnect flags conflicts with this behavior.
+
+        IMPORTANT: We do NOT use the delete_segments flag because:
+        1. When FFmpeg runs faster than real-time (which it does initially),
+           segments are deleted before clients can request them
+        2. This causes playback failures and "segment not found" errors
+        3. Segments are cleaned up when the session ends via _cleanup_all()
         """
         segment_duration = hls_config.segment_duration
         playlist_size = hls_config.playlist_size
@@ -537,10 +543,10 @@ class HLSChannelSession:
         user_agent = self._get_user_agent()
 
         # Build HLS flags
-        # - delete_segments: Remove old segments from disk
         # - append_list: Append to playlist instead of overwriting
         # - program_date_time: Add EXT-X-PROGRAM-DATE-TIME for better player sync
-        hls_flags = "delete_segments+append_list+program_date_time"
+        # NOTE: We intentionally do NOT use delete_segments - see docstring above
+        hls_flags = "append_list+program_date_time"
 
         # Determine segment extension based on fMP4 setting
         # fMP4 uses .m4s segments, regular HLS uses MPEG-TS (.ts)
@@ -562,11 +568,6 @@ class HLSChannelSession:
         # This supports indefinite streaming without segment number overflow
         segment_pattern = os.path.join(self.output_path, f"index%d.{segment_ext}")
 
-        # Calculate delete_threshold based on playlist_size for better buffering
-        # Keep at least as many extra segments as are in the playlist
-        # This prevents clients from losing their buffer position during playback
-        delete_threshold = max(3, playlist_size)
-
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -585,7 +586,6 @@ class HLSChannelSession:
             "-hls_time", str(segment_duration),
             "-hls_list_size", str(playlist_size),
             "-hls_flags", hls_flags,
-            "-hls_delete_threshold", str(delete_threshold),  # Keep extra segments for buffer
             "-hls_segment_filename", segment_pattern,
         ]
 
