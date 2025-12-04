@@ -206,15 +206,19 @@ class StreamProfile(models.Model):
 
         # For HLS profiles using fMP4 segments, add required fMP4 options
         # These must be added dynamically because they're not just placeholders
+        # IMPORTANT: These options must be inserted BEFORE the output playlist path,
+        # which is the last argument in the command. If we append after the playlist
+        # path, FFmpeg will fail with an invalid command syntax error.
         if self.is_hls_profile() and use_fmp4:
-            # Find the position to insert fMP4 options (before output playlist path)
-            # Insert AAC bitstream filter for converting ADTS to ASC (required for MP4 container)
-            # Insert fMP4-specific HLS options
-            cmd.extend([
+            # The playlist path (e.g., /path/index.m3u8) is the last argument
+            # Insert fMP4 options before it
+            fmp4_options = [
                 "-bsf:a", "aac_adtstoasc",  # Convert AAC ADTS to ASC for MP4 container
                 "-hls_fmp4_init_filename", "init.mp4",
                 "-hls_segment_type", "fmp4",
-            ])
+            ]
+            # Insert before the last element (playlist path)
+            cmd = cmd[:-1] + fmp4_options + [cmd[-1]]
 
         return cmd
 
