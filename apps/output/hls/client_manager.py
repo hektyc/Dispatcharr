@@ -348,10 +348,13 @@ class HLSClientManager:
     def _is_channel_truly_active(self, channel_uuid: str) -> bool:
         """Check if an HLS channel is truly active (not stale/orphaned).
 
-        A channel is considered truly active if:
-        1. The owner key exists (session has an owner)
-        2. The metadata key exists
-        3. The PID in metadata corresponds to a running process
+        A channel is considered truly active if the PID in metadata corresponds
+        to a running FFmpeg process. This is the MOST RELIABLE indicator.
+
+        IMPORTANT: We prioritize the PID check over the owner key check because:
+        - During automatic stream switches, the owner key may be in a transitional state
+        - The FFmpeg process running is the definitive proof of an active session
+        - Owner keys are managed by the HLS manager and may lag behind process state
 
         This helps prevent stale channels from appearing in the UI during
         the cleanup process when there may be timing gaps between different
@@ -361,19 +364,16 @@ class HLSClientManager:
             if not self.redis_client:
                 return False
 
-            # Check owner key exists
-            owner_key = f"{self.CHANNEL_KEY_PREFIX}{channel_uuid}:owner"
-            if not self.redis_client.exists(owner_key):
-                logger.debug(f"HLS channel {channel_uuid}: no owner key - not truly active")
-                return False
-
-            # Check metadata exists
+            # Check metadata exists first (needed to get PID)
             metadata_key = self._get_channel_metadata_key(channel_uuid)
             if not self.redis_client.exists(metadata_key):
                 logger.debug(f"HLS channel {channel_uuid}: no metadata key - not truly active")
                 return False
 
-            # Check if PID is still running (most reliable indicator)
+            # PRIORITY CHECK: Is the PID still running?
+            # This is the most reliable indicator of an active session.
+            # If the FFmpeg process is running, the channel is definitely active
+            # regardless of owner key state.
             pid_str = self.redis_client.hget(metadata_key, "pid")
             if pid_str:
                 try:
@@ -381,15 +381,26 @@ class HLSClientManager:
                     pid = int(pid_str)
                     # os.kill with signal 0 checks if process exists without killing it
                     os.kill(pid, 0)
-                    # Process exists - channel is truly active
+                    # Process exists - channel is DEFINITELY truly active
+                    logger.debug(f"HLS channel {channel_uuid}: PID {pid_str} is running - truly active")
                     return True
                 except (OSError, ValueError):
-                    # Process doesn't exist or PID is invalid
-                    logger.debug(f"HLS channel {channel_uuid}: PID {pid_str} not running - not truly active")
-                    return False
+                    # Process doesn't exist or PID is invalid - continue to other checks
+                    logger.debug(f"HLS channel {channel_uuid}: PID {pid_str} not running")
+                    pass
 
-            # No PID stored - assume not active
-            logger.debug(f"HLS channel {channel_uuid}: no PID in metadata - not truly active")
+            # PID check failed - now check owner key as secondary indicator
+            # (owner key alone is not sufficient, but its absence with no running PID
+            # is a strong indicator the channel is orphaned)
+            owner_key = f"{self.CHANNEL_KEY_PREFIX}{channel_uuid}:owner"
+            if self.redis_client.exists(owner_key):
+                # Owner key exists but PID not running - might be starting up
+                # Give benefit of the doubt
+                logger.debug(f"HLS channel {channel_uuid}: owner key exists but PID not running - assuming transitional")
+                return True
+
+            # No running PID and no owner key - channel is orphaned
+            logger.debug(f"HLS channel {channel_uuid}: no running PID and no owner key - not truly active")
             return False
 
         except Exception as e:
@@ -654,6 +665,15 @@ class HLSClientManager:
                            stream_metadata: dict = None):
         """Mark a channel as having an active HLS session.
 
+        When FFmpeg starts (or restarts after a stream switch), we add a synthetic
+        "session" client to prevent the cleanup thread from immediately killing the
+        session before real clients have a chance to reconnect.
+
+        This is critical for automatic stream switching: when FFmpeg exits and
+        restarts with a backup stream, the real client's Redis keys may have expired
+        during the restart period. Without this grace period, the cleanup thread
+        would see "no clients" and immediately stop the new session.
+
         Args:
             channel_uuid: The channel UUID
             stream_url: The stream URL being processed
@@ -697,7 +717,44 @@ class HLSClientManager:
                 self.redis_client.hset(metadata_key, mapping=mapping)
                 self.redis_client.expire(metadata_key, self._get_client_ttl() * 10)
 
-                logger.info(f"HLS channel marked active: {channel_uuid} (PID: {pid})")
+                # Add a synthetic "session" client to provide a startup grace period.
+                # This prevents the cleanup thread from killing the session before
+                # real clients have a chance to reconnect after a stream switch.
+                #
+                # The grace period is: shutdown_delay + client_ttl
+                # This gives clients enough time to:
+                # 1. Notice the stream switch (player may buffer/retry)
+                # 2. Request the new playlist
+                # 3. Start requesting segments again
+                #
+                # The synthetic client will be removed when real clients connect
+                # (they'll refresh the clients_key TTL), or it will expire naturally
+                # if no clients reconnect.
+                shutdown_delay = self._get_shutdown_delay()
+                client_ttl = self._get_client_ttl()
+                grace_period = shutdown_delay + client_ttl
+
+                clients_key = self._get_channel_clients_key(channel_uuid)
+                session_client_id = f"session_{channel_uuid[:8]}"
+
+                # Add the synthetic session client
+                self.redis_client.sadd(clients_key, session_client_id)
+                self.redis_client.expire(clients_key, grace_period)
+
+                # Store minimal metadata for the session client
+                session_client_key = self._get_client_key(channel_uuid, session_client_id)
+                self.redis_client.hset(session_client_key, mapping={
+                    "ip_address": "internal",
+                    "user_agent": "HLS Session Grace Period",
+                    "connected_at": current_time,
+                    "last_active": current_time,
+                })
+                self.redis_client.expire(session_client_key, grace_period)
+
+                logger.info(
+                    f"HLS channel marked active: {channel_uuid} (PID: {pid}, "
+                    f"grace_period={grace_period}s)"
+                )
                 self._trigger_stats_update()
 
         except Exception as e:
