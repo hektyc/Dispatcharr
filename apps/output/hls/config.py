@@ -41,13 +41,23 @@ class HLSConfig:
         """
         try:
             from core.models import CoreSettings, HLS_OUTPUT_SETTINGS_KEY
+            # Log the key we're looking for
+            logger.info(f"Looking for HLS settings with key: '{HLS_OUTPUT_SETTINGS_KEY}'")
+
             settings_obj = CoreSettings.objects.filter(key=HLS_OUTPUT_SETTINGS_KEY).first()
             if settings_obj:
-                return json.loads(settings_obj.value)
+                raw_value = settings_obj.value
+                logger.info(f"Found HLS settings in database: key='{settings_obj.key}', raw_value='{raw_value}'")
+                settings = json.loads(raw_value)
+                logger.info(f"Parsed HLS settings: {settings}")
+                return settings
             else:
+                # Log all CoreSettings keys to help debug
+                all_keys = list(CoreSettings.objects.values_list('key', flat=True))
+                logger.warning(f"HLS settings not found in database. Available keys: {all_keys}")
                 return {}
         except Exception as e:
-            logger.warning(f"Could not load HLS settings: {e}")
+            logger.error(f"Could not load HLS settings: {e}", exc_info=True)
             return {}
 
     def _invalidate_cache(self):

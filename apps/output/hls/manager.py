@@ -348,7 +348,14 @@ class HLSChannelSession:
             logger.error(f"Failed to build FFmpeg command for {self.channel_uuid}")
             return False
 
-        logger.info(f"Starting HLS output for {self.channel_uuid}: {' '.join(cmd)}")
+        # Extract hls_list_size from command for logging
+        hls_list_size_value = "unknown"
+        for i, arg in enumerate(cmd):
+            if arg == "-hls_list_size" and i + 1 < len(cmd):
+                hls_list_size_value = cmd[i + 1]
+                break
+        logger.info(f"Starting HLS output for {self.channel_uuid} with hls_list_size={hls_list_size_value}")
+        logger.info(f"Full FFmpeg command: {' '.join(cmd)}")
 
         try:
             # Note: HLS output writes to files, not stdout, so we use DEVNULL
@@ -488,7 +495,8 @@ class HLSChannelSession:
             "use_fmp4_segments": use_fmp4,
         }
 
-        logger.info(f"HLS {self.channel_uuid}: Building command from profile '{profile.name}' with segment_duration={hls_config_dict['segment_duration']}, playlist_size={hls_config_dict['playlist_size']}, fmp4={use_fmp4}")
+        logger.info(f"HLS {self.channel_uuid}: Building command from profile '{profile.name}' with segment_duration={hls_config_dict['segment_duration']}, playlist_size={hls_config_dict['playlist_size']} (hls_list_size), fmp4={use_fmp4}")
+        logger.info(f"HLS {self.channel_uuid}: Profile parameters template: {profile.parameters}")
 
         # Build command using profile
         try:
@@ -508,7 +516,8 @@ class HLSChannelSession:
                     cmd.insert(2, "-loglevel")
                     cmd.insert(3, "info")
 
-                logger.debug(f"Built HLS command from profile '{profile.name}': {cmd}")
+                # Log the final command to verify placeholder substitution worked
+                logger.info(f"HLS {self.channel_uuid}: Built command from profile '{profile.name}': {' '.join(cmd)}")
                 return cmd
             else:
                 # Empty command means proxy mode or error
@@ -532,12 +541,17 @@ class HLSChannelSession:
         2. This causes playback failures and "segment not found" errors
         3. Segments are cleaned up when the session ends via _cleanup_all()
         """
+        # Log what we're reading from the config to debug settings issues
+        # Get all settings via the public properties (which read from database)
         segment_duration = hls_config.segment_duration
         playlist_size = hls_config.playlist_size
         ll_hls_enabled = hls_config.ll_hls_enabled
         use_fmp4 = hls_config.use_fmp4_segments  # Includes LL-HLS check
 
-        logger.info(f"HLS {self.channel_uuid}: Building FFmpeg command with segment_duration={segment_duration}, playlist_size={playlist_size}, ll_hls={ll_hls_enabled}, fmp4={use_fmp4}")
+        # Also log all settings for debugging
+        all_settings = hls_config.to_dict()
+        logger.info(f"HLS {self.channel_uuid}: ALL SETTINGS FROM CONFIG: {all_settings}")
+        logger.info(f"HLS {self.channel_uuid}: Building FALLBACK FFmpeg command with segment_duration={segment_duration}, playlist_size={playlist_size} (hls_list_size), ll_hls={ll_hls_enabled}, fmp4={use_fmp4}")
 
         playlist_path = os.path.join(self.output_path, "index.m3u8")
         user_agent = self._get_user_agent()

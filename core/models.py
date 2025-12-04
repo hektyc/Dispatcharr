@@ -474,10 +474,11 @@ class CoreSettings(models.Model):
             return settings
         except (cls.DoesNotExist, json.JSONDecodeError):
             # Return defaults if not found or invalid JSON
+            # Note: playlist_size default is 10 to match apps/output/hls/config.py
             return {
                 "output_path": "/data/hls",
                 "segment_duration": 6,
-                "playlist_size": 5,
+                "playlist_size": 10,
                 "retention_seconds": 0,
                 "ll_hls_enabled": False,
                 "use_fmp4_segments": False,

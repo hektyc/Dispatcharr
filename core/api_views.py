@@ -473,9 +473,10 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
     def _get_or_create_settings(self):
         """Get or create the HLS output settings CoreSettings entry"""
         # Default settings with all fields
+        # Note: playlist_size default is 10 to match apps/output/hls/config.py
         defaults = {
             "segment_duration": 6,
-            "playlist_size": 5,
+            "playlist_size": 10,
             "retention_seconds": 0,
             "ll_hls_enabled": False,
             "use_fmp4_segments": False,
