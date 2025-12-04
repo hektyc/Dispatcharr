@@ -590,23 +590,47 @@ class HLSClientManager:
             logger.error(f"Error setting HLS channel active: {e}")
 
     def set_channel_inactive(self, channel_uuid: str):
-        """Mark a channel as no longer having an active HLS session."""
+        """Mark a channel as no longer having an active HLS session.
+
+        This method performs a comprehensive cleanup of ALL Redis keys associated
+        with the channel to prevent stale Active Connections from appearing in the UI.
+        """
         try:
             # Clean up all channel data in Redis
             if self.redis_client:
-                # Delete metadata
-                metadata_key = self._get_channel_metadata_key(channel_uuid)
-                self.redis_client.delete(metadata_key)
+                # Collect all keys to delete in a single pipeline for atomicity
+                keys_to_delete = []
 
-                # Delete all clients
+                # 1. Metadata key
+                metadata_key = self._get_channel_metadata_key(channel_uuid)
+                keys_to_delete.append(metadata_key)
+
+                # 2. Clients set key
                 clients_key = self._get_channel_clients_key(channel_uuid)
                 client_ids = self.redis_client.smembers(clients_key) or set()
+                keys_to_delete.append(clients_key)
 
+                # 3. Individual client keys
                 for client_id in client_ids:
                     client_key = self._get_client_key(channel_uuid, client_id)
-                    self.redis_client.delete(client_key)
+                    keys_to_delete.append(client_key)
 
-                self.redis_client.delete(clients_key)
+                # 4. Cleanup lock key
+                cleanup_lock_key = self._get_cleanup_lock_key(channel_uuid)
+                keys_to_delete.append(cleanup_lock_key)
+
+                # 5. Owner key (managed by HLSOutputManager but we clean it here too
+                #    to ensure complete cleanup when session is stopped by any worker)
+                owner_key = f"{self.CHANNEL_KEY_PREFIX}{channel_uuid}:owner"
+                keys_to_delete.append(owner_key)
+
+                # Delete all keys using pipeline for atomicity
+                if keys_to_delete:
+                    pipeline = self.redis_client.pipeline()
+                    for key in keys_to_delete:
+                        pipeline.delete(key)
+                    pipeline.execute()
+                    logger.debug(f"HLS {channel_uuid}: Deleted {len(keys_to_delete)} Redis keys")
 
             # Clean up local tracking
             with self._client_lock:
@@ -614,6 +638,8 @@ class HLSClientManager:
                     del self._local_clients[channel_uuid]
 
             logger.info(f"HLS channel marked inactive: {channel_uuid}")
+
+            # Trigger stats update AFTER all cleanup is complete
             self._trigger_stats_update()
 
         except Exception as e:

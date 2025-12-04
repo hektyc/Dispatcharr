@@ -1308,17 +1308,118 @@ class HLSOutputManager:
             logger.debug(f"HLS {channel_uuid}: Error refreshing ownership: {e}")
 
     def _is_session_active_in_redis(self, channel_uuid: str) -> bool:
-        """Check if any worker has an active session for this channel."""
+        """Check if any worker has an active session for this channel.
+
+        A session is considered active only if BOTH:
+        1. The owner key exists (a worker claims ownership)
+        2. The metadata key exists (the session has been properly initialized)
+
+        If only the owner key exists but no metadata, it's a stale session
+        that wasn't properly cleaned up.
+        """
         redis_client = self._get_redis_client()
         if not redis_client:
             return False
 
         try:
             owner_key = self._get_owner_key(channel_uuid)
-            return redis_client.exists(owner_key)
+            metadata_key = f"hls_output:channel:{channel_uuid}:metadata"
+
+            # Check both keys exist
+            owner_exists = redis_client.exists(owner_key)
+            if not owner_exists:
+                return False
+
+            # Owner exists - check if metadata also exists
+            metadata_exists = redis_client.exists(metadata_key)
+            if not metadata_exists:
+                # Stale owner key - session wasn't properly cleaned up
+                logger.debug(f"HLS {channel_uuid}: Owner key exists but no metadata - stale session")
+                return False
+
+            return True
         except Exception as e:
             logger.debug(f"HLS {channel_uuid}: Error checking Redis session: {e}")
             return False
+
+    def _force_cleanup_stale_session(self, channel_uuid: str):
+        """
+        Force cleanup of a stale HLS session.
+
+        This is called when an owner key exists but no playlist is being produced,
+        indicating the previous owner died without proper cleanup.
+
+        This method:
+        1. Deletes the stale owner key
+        2. Kills any orphaned FFmpeg process using the PID from metadata
+        3. Cleans up all Redis keys for the channel
+        4. Cleans up the HLS output directory
+        """
+        import os
+        import signal
+        import shutil
+
+        redis_client = self._get_redis_client()
+        if not redis_client:
+            return
+
+        try:
+            logger.info(f"HLS {channel_uuid}: Force cleaning up stale session")
+
+            # Get PID from metadata before deleting it
+            metadata_key = f"hls_output:channel:{channel_uuid}:metadata"
+            pid_str = redis_client.hget(metadata_key, "pid")
+
+            # Kill orphaned FFmpeg process if PID exists
+            if pid_str:
+                try:
+                    pid = int(pid_str)
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                        logger.info(f"HLS {channel_uuid}: Sent SIGTERM to orphaned FFmpeg process {pid}")
+                        # Wait briefly for process to die
+                        time.sleep(0.5)
+                        try:
+                            os.kill(pid, 0)  # Check if still running
+                            os.kill(pid, signal.SIGKILL)
+                            logger.info(f"HLS {channel_uuid}: Sent SIGKILL to orphaned FFmpeg process {pid}")
+                        except OSError:
+                            pass  # Process already dead
+                    except OSError as e:
+                        if e.errno != 3:  # 3 = No such process
+                            logger.debug(f"HLS {channel_uuid}: Error killing orphaned process {pid}: {e}")
+                except (ValueError, TypeError):
+                    pass
+
+            # Delete all Redis keys for this channel
+            keys_to_delete = [
+                self._get_owner_key(channel_uuid),
+                metadata_key,
+                f"hls_output:channel:{channel_uuid}:clients",
+                f"hls_output:channel:{channel_uuid}:cleanup_lock",
+            ]
+
+            # Also delete any client keys
+            client_keys = redis_client.keys(f"hls_output:channel:{channel_uuid}:client:*")
+            keys_to_delete.extend(client_keys)
+
+            if keys_to_delete:
+                redis_client.delete(*keys_to_delete)
+                logger.debug(f"HLS {channel_uuid}: Deleted {len(keys_to_delete)} stale Redis keys")
+
+            # Clean up HLS output directory
+            channel_path = hls_config.get_channel_path(channel_uuid)
+            if os.path.exists(channel_path):
+                try:
+                    shutil.rmtree(channel_path)
+                    logger.info(f"HLS {channel_uuid}: Cleaned up stale HLS directory")
+                except Exception as e:
+                    logger.warning(f"HLS {channel_uuid}: Error cleaning up stale directory: {e}")
+
+            logger.info(f"HLS {channel_uuid}: Stale session cleanup complete")
+
+        except Exception as e:
+            logger.error(f"HLS {channel_uuid}: Error in force cleanup: {e}")
 
     @classmethod
     def get_instance(cls) -> "HLSOutputManager":
@@ -1383,6 +1484,9 @@ class HLSOutputManager:
                         return placeholder
                 # Still no playlist - maybe the owner died, try to take over
                 logger.warning(f"HLS {channel_uuid}: Playlist not ready, attempting takeover")
+                # Force cleanup of stale ownership - the owner key exists but no playlist
+                # This indicates the previous owner died without proper cleanup
+                self._force_cleanup_stale_session(channel_uuid)
 
             # Try to acquire ownership
             if not self._try_acquire_ownership(channel_uuid):
