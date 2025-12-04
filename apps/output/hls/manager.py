@@ -324,8 +324,16 @@ class HLSChannelSession:
         # Default user agent
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-    def start(self):
-        """Start the FFmpeg process for HLS output."""
+    def start(self, preserve_segments: bool = False):
+        """Start the FFmpeg process for HLS output.
+
+        Args:
+            preserve_segments: If True, don't clean up existing segments.
+                             This is used during automatic stream switch to allow
+                             seamless transition - the player can continue fetching
+                             existing segments while FFmpeg starts writing new ones.
+                             The hls_flags append_list ensures segment numbering continues.
+        """
         if self.is_running:
             logger.warning(f"HLS session for {self.channel_uuid} already running")
             return False
@@ -339,8 +347,11 @@ class HLSChannelSession:
             logger.error(f"Failed to create output directory for {self.channel_uuid}")
             return False
 
-        # Clean up any stale segments
-        self._cleanup_segments()
+        # Clean up any stale segments UNLESS we're preserving them for seamless switch
+        if preserve_segments:
+            logger.info(f"HLS {self.channel_uuid}: Preserving existing segments for seamless stream switch")
+        else:
+            self._cleanup_segments()
 
         # Build FFmpeg command
         cmd = self._build_ffmpeg_command()
@@ -1069,7 +1080,10 @@ class HLSChannelSession:
                 new_session._current_stream_id = stream_id
 
                 # Try to start the new session
-                if new_session.start():
+                # IMPORTANT: preserve_segments=True for seamless transition
+                # This keeps existing segments so the player can continue fetching
+                # them while FFmpeg starts writing new ones with append_list flag
+                if new_session.start(preserve_segments=True):
                     # Replace the old session in the manager
                     with hls_manager._sessions_lock:
                         hls_manager._sessions[self.channel_uuid] = new_session
@@ -1660,7 +1674,10 @@ class HLSOutputManager:
             )
 
             # Start the new session
-            if new_session.start():
+            # IMPORTANT: preserve_segments=True for seamless transition
+            # This keeps existing segments so the player can continue fetching
+            # them while FFmpeg starts writing new ones with append_list flag
+            if new_session.start(preserve_segments=True):
                 self._sessions[channel_uuid] = new_session
 
                 # Update Redis metadata
@@ -1688,7 +1705,8 @@ class HLSOutputManager:
                     channel=channel,
                     stream_metadata=old_stream_metadata
                 )
-                if recovery_session.start():
+                # Recovery also preserves segments for seamless fallback
+                if recovery_session.start(preserve_segments=True):
                     self._sessions[channel_uuid] = recovery_session
                     return {
                         'status': 'error',
