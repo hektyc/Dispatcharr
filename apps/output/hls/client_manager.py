@@ -695,6 +695,10 @@ class HLSClientManager:
                 current_time = str(time.time())
                 metadata_key = self._get_channel_metadata_key(channel_uuid)
 
+                # Clear any existing cooldown - this is an intentional session start
+                cooldown_key = self._get_cooldown_key(channel_uuid)
+                self.redis_client.delete(cooldown_key)
+
                 mapping = {
                     "state": "running",
                     "type": "hls",
@@ -770,15 +774,52 @@ class HLSClientManager:
         except Exception as e:
             logger.error(f"Error setting HLS channel active: {e}")
 
+    def _get_cooldown_key(self, channel_uuid: str) -> str:
+        """Get the Redis key for storing channel cooldown timestamp."""
+        return f"{self.CHANNEL_KEY_PREFIX}{channel_uuid}:cooldown"
+
+    def is_channel_in_cooldown(self, channel_uuid: str) -> bool:
+        """Check if a channel is in cooldown period after being stopped.
+
+        This prevents stale client requests from restarting a channel that was
+        recently stopped. The cooldown period is shutdown_delay + client_ttl,
+        which matches the grace period for new channels.
+
+        Returns:
+            True if channel is in cooldown and should not be restarted
+        """
+        try:
+            if self.redis_client:
+                cooldown_key = self._get_cooldown_key(channel_uuid)
+                if self.redis_client.exists(cooldown_key):
+                    logger.debug(f"HLS {channel_uuid}: In cooldown period, ignoring restart request")
+                    return True
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking HLS channel cooldown: {e}")
+            return False
+
     def set_channel_inactive(self, channel_uuid: str):
         """Mark a channel as no longer having an active HLS session.
 
         This method performs a comprehensive cleanup of ALL Redis keys associated
         with the channel to prevent stale Active Connections from appearing in the UI.
+
+        Also sets a cooldown period to prevent stale requests from immediately
+        restarting the channel.
         """
         try:
             # Clean up all channel data in Redis
             if self.redis_client:
+                # Set cooldown to prevent stale requests from restarting the channel
+                # Cooldown period = shutdown_delay + client_ttl (matches grace period)
+                cooldown_key = self._get_cooldown_key(channel_uuid)
+                shutdown_delay = self._get_shutdown_delay()
+                client_ttl = self._get_client_ttl()
+                cooldown_seconds = shutdown_delay + client_ttl
+                self.redis_client.setex(cooldown_key, cooldown_seconds, "1")
+                logger.debug(f"HLS {channel_uuid}: Set cooldown for {cooldown_seconds}s")
+
                 # Collect all keys to delete in a single pipeline for atomicity
                 keys_to_delete = []
 

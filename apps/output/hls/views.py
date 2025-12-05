@@ -70,6 +70,11 @@ def hls_master_playlist(request, channel_uuid: str):
     if channel_or_stream is None:
         return HttpResponseNotFound("Channel or stream not found")
 
+    # Check if channel is in cooldown (recently stopped)
+    # This prevents stale requests from restarting a channel that was just stopped
+    if hls_client_manager.is_channel_in_cooldown(channel_uuid):
+        return HttpResponse("Channel recently stopped", status=503)
+
     # Get direct stream URL based on object type
     if isinstance(channel_or_stream, Channel):
         # It's a channel - use the channel's stream selection logic
@@ -223,6 +228,11 @@ def hls_media_playlist(request, channel_uuid: str):
     if not os.path.exists(playlist_path):
         # Playlist doesn't exist - check if we need to start a session
         if not activity_updated:
+            # Check if channel is in cooldown (recently stopped)
+            # This prevents stale requests from restarting a channel that was just stopped
+            if hls_client_manager.is_channel_in_cooldown(channel_uuid):
+                return HttpResponse("Channel recently stopped", status=503)
+
             # Channel is not active - try to start a session
             # This handles cases where the session was cleaned up or never started
             logger.info(f"HLS {channel_uuid}: No active session, attempting to start from media playlist request")
