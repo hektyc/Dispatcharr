@@ -542,9 +542,10 @@ class HLSChannelSession:
     def _build_fallback_command(self):
         """Build a fallback FFmpeg command when no profile is available.
 
-        Note: Reconnect flags are NOT included here because Dispatcharr's core
-        logic handles stream reconnection at a higher level. Having FFmpeg's
-        reconnect flags conflicts with this behavior.
+        Reconnect flags are included with a short timeout (2 seconds):
+        - FFmpeg handles brief network hiccups via reconnect
+        - If reconnection fails after 2 seconds, Dispatcharr's automatic stream
+          switch takes over and tries backup streams
 
         IMPORTANT: We do NOT use the delete_segments flag because:
         1. When FFmpeg runs faster than real-time (which it does initially),
@@ -598,7 +599,12 @@ class HLSChannelSession:
             "-hide_banner",
             "-loglevel", "info",  # Need 'info' to capture stream info for stats display
             # Input options - must come before -i
-            # Note: No reconnect flags - Dispatcharr core handles reconnection
+            # Reconnect flags: Handle brief upstream disconnections gracefully
+            # - FFmpeg handles hiccups < 2 seconds via reconnect
+            # - Dispatcharr's automatic stream switch handles permanent failures
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",  # Short timeout so auto-switch can take over
             "-user_agent", user_agent,
             # Input buffer to handle source instability (prevents short freezes)
             # +igndts: Ignore DTS (decode timestamp) when PTS is available - prevents
