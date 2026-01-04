@@ -799,6 +799,28 @@ class HLSClientManager:
             logger.debug(f"Error checking HLS channel cooldown: {e}")
             return False
 
+    def clear_cooldown(self, channel_uuid: str) -> bool:
+        """Clear the cooldown for a channel, allowing it to be started immediately.
+
+        This should be called when an intentional new session start is detected,
+        such as a master playlist request. The master playlist is the entry point
+        for HLS playback and indicates a user actively wants to start watching.
+
+        Returns:
+            True if cooldown was cleared, False on error
+        """
+        try:
+            if self.redis_client:
+                cooldown_key = self._get_cooldown_key(channel_uuid)
+                deleted = self.redis_client.delete(cooldown_key)
+                if deleted:
+                    logger.debug(f"HLS {channel_uuid}: Cooldown cleared for intentional session start")
+                return True
+            return True  # No Redis = no cooldown to clear
+        except Exception as e:
+            logger.debug(f"Error clearing HLS channel cooldown: {e}")
+            return False
+
     def set_channel_inactive(self, channel_uuid: str):
         """Mark a channel as no longer having an active HLS session.
 

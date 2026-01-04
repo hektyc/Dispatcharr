@@ -70,10 +70,12 @@ def hls_master_playlist(request, channel_uuid: str):
     if channel_or_stream is None:
         return HttpResponseNotFound("Channel or stream not found")
 
-    # Check if channel is in cooldown (recently stopped)
-    # This prevents stale requests from restarting a channel that was just stopped
-    if hls_client_manager.is_channel_in_cooldown(channel_uuid):
-        return HttpResponse("Channel recently stopped", status=503)
+    # Master playlist request is the entry point for HLS playback - this is always
+    # an intentional new session start (user clicked play). Clear any cooldown to
+    # allow the session to start. The cooldown mechanism still protects against
+    # stale media playlist/segment requests that might arrive without a master
+    # playlist request first.
+    hls_client_manager.clear_cooldown(channel_uuid)
 
     # Get direct stream URL based on object type
     if isinstance(channel_or_stream, Channel):
