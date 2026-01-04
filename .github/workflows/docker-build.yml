@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - dev
+  workflow_dispatch: # Allow manual triggering
 
 jobs:
   build-and-push:
