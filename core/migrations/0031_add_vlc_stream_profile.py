@@ -34,7 +34,7 @@ def remove_vlc_profile(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('core', '0018_alter_systemevent_event_type'),
+        ('core', '0030_hls_add_reconnect_flags'),
     ]
 
     operations = [
