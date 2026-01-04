@@ -7,10 +7,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-01-04
+
+### Added
+
+- Advanced filtering for Channels table: Filter menu now allows toggling disabled channels visibility (when a profile is selected) and filtering to show only empty channels without streams (Closes #182)
+- Network Access warning modal now displays the client's IP address for better transparency when network restrictions are being enforced - Thanks [@damien-alt-sudo](https://github.com/damien-alt-sudo) (Closes #778)
+- VLC streaming support - Thanks [@sethwv](https://github.com/sethwv)
+  - Added `cvlc` as an alternative streaming backend alongside FFmpeg and Streamlink
+  - Log parser refactoring: Introduced `LogParserFactory` and stream-specific parsers (`FFmpegLogParser`, `VLCLogParser`, `StreamlinkLogParser`) to enable codec and resolution detection from multiple streaming tools
+  - VLC log parsing for stream information: Detects video/audio codecs from TS demux output, supports both stream-copy and transcode modes with resolution/FPS extraction from transcode output
+  - Locked, read-only VLC stream profile configured for headless operation with intelligent audio/video codec detection
+  - VLC and required plugins installed in Docker environment with headless configuration
+- ErrorBoundary component for handling frontend errors gracefully with generic error message - Thanks [@nick4810](https://github.com/nick4810)
+
 ### Changed
 
+- Fixed event viewer arrow direction (previously inverted) — UI behavior corrected. - Thanks [@drnikcuk](https://github.com/drnikcuk) (Closes #772)
+- Region code options now intentionally include both `GB` (ISO 3166-1 standard) and `UK` (commonly used by EPG/XMLTV providers) to accommodate real-world EPG data variations. Many providers use `UK` in channel identifiers (e.g., `BBCOne.uk`) despite `GB` being the official ISO country code. Users should select the region code that matches their specific EPG provider's convention for optimal region-based EPG matching bonuses - Thanks [@bigpandaaaa](https://github.com/bigpandaaaa)
+- Channel number inputs in stream-to-channel creation modals no longer have a maximum value restriction, allowing users to enter any valid channel number supported by the database
+- Stream log parsing refactored to use factory pattern: Simplified `ChannelService.parse_and_store_stream_info()` to route parsing through specialized log parsers instead of inline program-specific logic (~150 lines of code removed)
+- Stream profile names in fixtures updated to use proper capitalization (ffmpeg → FFmpeg, streamlink → Streamlink)
+- Frontend component refactoring for improved code organization and maintainability - Thanks [@nick4810](https://github.com/nick4810)
+  - Extracted large nested components into separate files (RecordingCard, RecordingDetailsModal, RecurringRuleModal, RecordingSynopsis, GuideRow, HourTimeline, PluginCard, ProgramRecordingModal, SeriesRecordingModal, Field)
+  - Moved business logic from components into dedicated utility files (dateTimeUtils, RecordingCardUtils, RecordingDetailsModalUtils, RecurringRuleModalUtils, DVRUtils, guideUtils, PluginsUtils, PluginCardUtils, notificationUtils)
+  - Lazy loaded heavy components (SuperuserForm, RecordingDetailsModal, ProgramRecordingModal, SeriesRecordingModal, PluginCard) with loading fallbacks
+  - Removed unused Dashboard and Home pages
+  - Guide page refactoring: Extracted GuideRow and HourTimeline components, moved grid calculations and utility functions to guideUtils.js, added loading states for initial data fetching, improved performance through better memoization
+  - Plugins page refactoring: Extracted PluginCard and Field components, added Zustand store for plugin state management, improved plugin action confirmation handling, better separation of concerns between UI and business logic
+- Logo loading optimization: Logos now load only after both Channels and Streams tables complete loading to prevent blocking initial page render, with rendering gated by table readiness to ensure data loads before visual elements
+- M3U stream URLs now use `build_absolute_uri_with_port()` for consistency with EPG and logo URLs, ensuring uniform port handling across all M3U file URLs
+- Settings and Logos page refactoring for improved readability and separation of concerns - Thanks [@nick4810](https://github.com/nick4810)
+  - Extracted individual settings forms (DVR, Network Access, Proxy, Stream, System, UI) into separate components with dedicated utility files
+  - Moved larger nested components into their own files
+  - Moved business logic into corresponding utils/ files
+  - Extracted larger in-line component logic into its own function
+  - Each panel in Settings now uses its own form state with the parent component handling active state management
+
+### Fixed
+
+- Auto Channel Sync Force EPG Source feature not properly forcing "No EPG" assignment - When selecting "Force EPG Source" > "No EPG (Disabled)", channels were still being auto-matched to EPG data instead of forcing dummy/no EPG. Now correctly sets `force_dummy_epg` flag to prevent unwanted EPG assignment. (Fixes #788)
+- VOD episode processing now properly handles season and episode numbers from APIs that return string values instead of integers, with comprehensive error logging to track data quality issues - Thanks [@patchy8736](https://github.com/patchy8736) (Fixes #770)
+- VOD episode-to-stream relations are now validated to ensure episodes have been saved to the database before creating relations, preventing integrity errors when bulk_create operations encounter conflicts - Thanks [@patchy8736](https://github.com/patchy8736)
+- VOD category filtering now correctly handles category names containing pipe "|" characters (e.g., "PL | BAJKI", "EN | MOVIES") by using `rsplit()` to split from the right instead of the left, ensuring the category type is correctly extracted as the last segment - Thanks [@Vitekant](https://github.com/Vitekant)
+- M3U and EPG URLs now correctly preserve non-standard HTTPS ports (e.g., `:8443`) when accessed behind reverse proxies that forward the port in headers — `get_host_and_port()` now properly checks `X-Forwarded-Port` header before falling back to other detection methods (Fixes #704)
+- M3U and EPG manager page no longer crashes when a playlist references a deleted channel group (Fixes screen blank on navigation)
+- Stream validation now returns original URL instead of redirected URL to prevent issues with temporary redirect URLs that expire before clients can connect
+- XtreamCodes EPG limit parameter now properly converted to integer to prevent type errors when accessing EPG listings (Fixes #781)
+- Docker container file permissions: Django management commands (`migrate`, `collectstatic`) now run as the non-root user to prevent root-owned `__pycache__` and static files from causing permission issues - Thanks [@sethwv](https://github.com/sethwv)
+- Stream validation now continues with GET request if HEAD request fails due to connection issues - Thanks [@kvnnap](https://github.com/kvnnap) (Fixes #782)
+- XtreamCodes M3U files now correctly set `x-tvg-url` and `url-tvg` headers to reference XC EPG URL (`xmltv.php`) instead of standard EPG endpoint when downloaded via XC API (Fixes #629)
+
+## [0.15.1] - 2025-12-22
+
+### Fixed
+
+- XtreamCodes EPG `has_archive` field now returns integer `0` instead of string `"0"` for proper JSON type consistency
+- nginx now gracefully handles hosts without IPv6 support by automatically disabling IPv6 binding at startup (Fixes #744)
+
+## [0.15.0] - 2025-12-20
+
+### Added
+
+- VOD client stop button in Stats page: Users can now disconnect individual VOD clients from the Stats view, similar to the existing channel client disconnect functionality.
+- Automated configuration backup/restore system with scheduled backups, retention policies, and async task processing - Thanks [@stlalpha](https://github.com/stlalpha) (Closes #153)
+- Stream group as available hash option: Users can now select 'Group' as a hash key option in Settings → Stream Settings → M3U Hash Key, allowing streams to be differentiated by their group membership in addition to name, URL, TVG-ID, and M3U ID
+
+### Changed
+
+- Initial super user creation page now matches the login page design with logo, welcome message, divider, and version display for a more consistent and polished first-time setup experience
+- Removed unreachable code path in m3u output - Thanks [@DawtCom](https://github.com/DawtCom)
+- GitHub Actions workflows now use `docker/metadata-action` for cleaner and more maintainable OCI-compliant image label generation across all build pipelines (ci.yml, base-image.yml, release.yml). Labels are applied to both platform-specific images and multi-arch manifests with proper annotation formatting. - Thanks [@mrdynamo]https://github.com/mrdynamo) (Closes #724)
+- Update docker/dev-build.sh to support private registries, multiple architectures and pushing. Now you can do things like `dev-build.sh  -p -r my.private.registry -a linux/arm64,linux/amd64` - Thanks [@jdblack](https://github.com/jblack)
+- Updated dependencies: Django (5.2.4 → 5.2.9) includes CVE security patch, psycopg2-binary (2.9.10 → 2.9.11), celery (5.5.3 → 5.6.0), djangorestframework (3.16.0 → 3.16.1), requests (2.32.4 → 2.32.5), psutil (7.0.0 → 7.1.3), gevent (25.5.1 → 25.9.1), rapidfuzz (3.13.0 → 3.14.3), torch (2.7.1 → 2.9.1), sentence-transformers (5.1.0 → 5.2.0), lxml (6.0.0 → 6.0.2) (Closes #662)
+- Frontend dependencies updated: Vite (6.2.0 → 7.1.7), ESLint (9.21.0 → 9.27.0), and related packages; added npm `overrides` to enforce js-yaml@^4.1.1 for transitive security fix. All 6 reported vulnerabilities resolved with `npm audit fix`.
+- Floating video player now supports resizing via a drag handles, with minimum size enforcement and viewport/page boundary constraints to keep it visible.
+- Redis connection settings now fully configurable via environment variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_URL`), replacing hardcoded `localhost:6379` values throughout the codebase. This enables use of external Redis services in production deployments. (Closes #762)
+- Celery broker and result backend URLs now respect `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB` settings as defaults, with `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` environment variables available for override.
+
+### Fixed
+
+- Docker init script now validates DISPATCHARR_PORT is an integer before using it, preventing sed errors when Kubernetes sets it to a service URL like `tcp://10.98.37.10:80`. Falls back to default port 9191 when invalid (Fixes #737)
+- M3U Profile form now properly resets local state for search and replace patterns after saving, preventing validation errors when adding multiple profiles in a row
+- DVR series rule deletion now properly handles TVG IDs that contain slashes by encoding them in the URL path (Fixes #697)
+- VOD episode processing now correctly handles duplicate episodes (same episode in multiple languages/qualities) by reusing Episode records across multiple M3UEpisodeRelation entries instead of attempting to create duplicates (Fixes #556)
+- XtreamCodes series streaming endpoint now correctly handles episodes with multiple streams (different languages/qualities) by selecting the best available stream based on account priority (Fixes #569)
+- XtreamCodes series info API now returns unique episodes instead of duplicate entries when multiple streams exist for the same episode (different languages/qualities)
+- nginx now gracefully handles hosts without IPv6 support by automatically disabling IPv6 binding at startup (Fixes #744)
+- XtreamCodes EPG API now returns correct date/time format for start/end fields and proper string types for timestamps and channel_id
+- XtreamCodes EPG API now handles None values for title and description fields to prevent AttributeError
+- XtreamCodes EPG `id` field now provides unique identifiers per program listing instead of always returning "0" for better client EPG handling
+- XtreamCodes EPG `epg_id` field now correctly returns the EPGData record ID (representing the EPG source/channel mapping) instead of a dummy value
+
+## [0.14.0] - 2025-12-09
+
+### Added
+
+- Sort buttons for 'Group' and 'M3U' columns in Streams table for improved stream organization and filtering - Thanks [@bobey6](https://github.com/bobey6)
+- EPG source priority field for controlling which EPG source is preferred when multiple sources have matching entries for a channel (higher numbers = higher priority) (Closes #603)
+
+### Changed
+
+- EPG program parsing optimized for sources with many channels but only a fraction mapped. Now parses XML file once per source instead of once per channel, dramatically reducing I/O and CPU overhead. For sources with 10,000 channels and 100 mapped, this results in ~99x fewer file opens and ~100x fewer full file scans. Orphaned programs for unmapped channels are also cleaned up during refresh to prevent database bloat. Database updates are now atomic to prevent clients from seeing empty/partial EPG data during refresh.
+- EPG table now displays detailed status messages including refresh progress, success messages, and last message for idle sources (matching M3U table behavior) (Closes #214)
 - IPv6 access now allowed by default with all IPv6 CIDRs accepted - Thanks [@adrianmace](https://github.com/adrianmace)
 - nginx.conf updated to bind to both IPv4 and IPv6 ports - Thanks [@jordandalley](https://github.com/jordandalley)
+- EPG matching now respects source priority and only uses active (enabled) EPG sources (Closes #672)
+- EPG form API Key field now only visible when Schedules Direct source type is selected
+
+### Fixed
+
+- EPG table "Updated" column now updates in real-time via WebSocket using the actual backend timestamp instead of requiring a page refresh
+- Bulk channel editor confirmation dialog now displays the correct stream profile name that will be applied to the selected channels.
+- uWSGI not found and 502 bad gateway on first startup
+
+## [0.13.1] - 2025-12-06
+
+### Fixed
+
+- JWT token generated so is unique for each deployment
 
 ## [0.13.0] - 2025-12-02
 

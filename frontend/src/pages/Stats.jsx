@@ -89,7 +89,7 @@ const getStartDate = (uptime) => {
 };
 
 // Create a VOD Card component similar to ChannelCard
-const VODCard = ({ vodContent }) => {
+const VODCard = ({ vodContent, stopVODClient }) => {
   const [dateFormatSetting] = useLocalStorage('date-format', 'mdy');
   const dateFormat = dateFormatSetting === 'mdy' ? 'MM/DD' : 'DD/MM';
   const [isClientExpanded, setIsClientExpanded] = useState(false);
@@ -329,6 +329,19 @@ const VODCard = ({ vodContent }) => {
                 </Center>
               </Tooltip>
             )}
+            {connection && stopVODClient && (
+              <Center>
+                <Tooltip label="Stop VOD Connection">
+                  <ActionIcon
+                    variant="transparent"
+                    color="red.9"
+                    onClick={() => stopVODClient(connection.client_id)}
+                  >
+                    <SquareX size="24" />
+                  </ActionIcon>
+                </Tooltip>
+              </Center>
+            )}
           </Group>
         </Group>
 
@@ -468,8 +481,8 @@ const VODCard = ({ vodContent }) => {
                   size={16}
                   style={{
                     transform: isClientExpanded
-                      ? 'rotate(180deg)'
-                      : 'rotate(0deg)',
+                      ? 'rotate(0deg)'
+                      : 'rotate(180deg)',
                     transition: 'transform 0.2s',
                   }}
                 />
@@ -1303,6 +1316,12 @@ const ChannelsPage = () => {
     await API.stopClient(channelId, clientId);
   };
 
+  const stopVODClient = async (clientId) => {
+    await API.stopVODClient(clientId);
+    // Refresh VOD stats after stopping to update the UI
+    fetchVODStats();
+  };
+
   // Function to fetch channel stats from API
   const fetchChannelStats = useCallback(async () => {
     try {
@@ -1591,7 +1610,11 @@ const ChannelsPage = () => {
                   );
                 } else if (connection.type === 'vod') {
                   return (
-                    <VODCard key={connection.id} vodContent={connection.data} />
+                    <VODCard
+                      key={connection.id}
+                      vodContent={connection.data}
+                      stopVODClient={stopVODClient}
+                    />
                   );
                 }
                 return null;

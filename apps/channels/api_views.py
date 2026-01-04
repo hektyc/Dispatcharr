@@ -8,7 +8,9 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from django.shortcuts import get_object_or_404, get_list_or_404
 from django.db import transaction
+from django.db.models import Q
 import os, json, requests, logging
+from urllib.parse import unquote
 from apps.accounts.permissions import (
     Authenticated,
     IsAdmin,
@@ -124,7 +126,7 @@ class StreamViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = StreamFilter
     search_fields = ["name", "channel_group__name"]
-    ordering_fields = ["name", "channel_group__name"]
+    ordering_fields = ["name", "channel_group__name", "m3u_account__name"]
     ordering = ["-name"]
 
     def get_permissions(self):
@@ -419,10 +421,36 @@ class ChannelViewSet(viewsets.ModelViewSet):
             group_names = channel_group.split(",")
             qs = qs.filter(channel_group__name__in=group_names)
 
-        if self.request.user.user_level < 10:
-            qs = qs.filter(user_level__lte=self.request.user.user_level)
+        filters = {}
+        q_filters = Q()
 
-        return qs
+        channel_profile_id = self.request.query_params.get("channel_profile_id")
+        show_disabled_param = self.request.query_params.get("show_disabled", None)
+        only_streamless = self.request.query_params.get("only_streamless", None)
+
+        if channel_profile_id:
+            try:
+                profile_id_int = int(channel_profile_id)
+                filters["channelprofilemembership__channel_profile_id"] = profile_id_int
+
+                if show_disabled_param is None:
+                    filters["channelprofilemembership__enabled"] = True
+            except (ValueError, TypeError):
+                # Ignore invalid profile id values
+                pass
+
+        if only_streamless:
+            q_filters &= Q(streams__isnull=True)
+
+        if self.request.user.user_level < 10:
+            filters["user_level__lte"] = self.request.user.user_level
+
+        if filters:
+            qs = qs.filter(**filters)
+        if q_filters:
+            qs = qs.filter(q_filters)
+
+        return qs.distinct()
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -2026,7 +2054,7 @@ class DeleteSeriesRuleAPIView(APIView):
             return [Authenticated()]
 
     def delete(self, request, tvg_id):
-        tvg_id = str(tvg_id)
+        tvg_id = unquote(str(tvg_id or ""))
         rules = [r for r in CoreSettings.get_dvr_series_rules() if str(r.get("tvg_id")) != tvg_id]
         CoreSettings.set_dvr_series_rules(rules)
         return Response({"success": True, "rules": rules})
