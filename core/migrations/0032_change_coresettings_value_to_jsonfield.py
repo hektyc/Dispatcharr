@@ -250,7 +250,7 @@ def reverse_migration(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('core', '0019_add_vlc_stream_profile'),
+        ('core', '0031_add_vlc_stream_profile'),
     ]
 
     operations = [
