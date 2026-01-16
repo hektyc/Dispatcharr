@@ -107,18 +107,45 @@ class HLSOutputSettingsSerializer(serializers.Serializer):
     Note: output_path is NOT included here - it's configured via the
     HLS_OUTPUT_PATH environment variable in docker-compose.yml or .env file.
 
-    Settings are intentionally flexible to support various user environments:
+    FFmpeg Output Settings:
     - segment_duration: 2-60 seconds (higher values for slow connections)
     - playlist_size: 3-100 segments (higher values for longer buffer)
     - retention_seconds: 0-86400 (up to 24 hours for DVR-like use cases)
     - shutdown_delay: 0-300 seconds (default 15, higher recommended for HDHR clients)
+
+    HLS.js Player Settings (used by web player):
+    - player_enable_worker: Enable Web Worker for better performance
+    - player_low_latency_mode: Enable low-latency mode (for LL-HLS streams)
+    - player_back_buffer_length: Max back buffer length in seconds
+    - player_max_buffer_length: Max buffer length in seconds
+    - player_max_max_buffer_length: Absolute max buffer length
+    - player_live_sync_duration_count: Segments behind live edge
+    - player_live_max_latency_duration_count: Max latency before seeking
+    - player_live_duration_infinity: Treat live stream as infinite
+    - player_manifest_loading_max_retry: Manifest load retry count
+    - player_level_loading_max_retry: Level load retry count
+    - player_frag_loading_max_retry: Fragment load retry count
     """
+    # FFmpeg output settings
     segment_duration = serializers.IntegerField(min_value=2, max_value=60, required=False, default=6)
     playlist_size = serializers.IntegerField(min_value=3, max_value=100, required=False, default=10)
     retention_seconds = serializers.IntegerField(min_value=0, max_value=86400, required=False, default=0)
     ll_hls_enabled = serializers.BooleanField(required=False, default=False)
     use_fmp4_segments = serializers.BooleanField(required=False, default=False)
     shutdown_delay = serializers.IntegerField(min_value=0, max_value=300, required=False, default=15)
+
+    # HLS.js player settings
+    player_enable_worker = serializers.BooleanField(required=False, default=True)
+    player_low_latency_mode = serializers.BooleanField(required=False, default=False)
+    player_back_buffer_length = serializers.IntegerField(min_value=0, max_value=300, required=False, default=30)
+    player_max_buffer_length = serializers.IntegerField(min_value=10, max_value=300, required=False, default=30)
+    player_max_max_buffer_length = serializers.IntegerField(min_value=30, max_value=600, required=False, default=60)
+    player_live_sync_duration_count = serializers.IntegerField(min_value=1, max_value=20, required=False, default=4)
+    player_live_max_latency_duration_count = serializers.IntegerField(min_value=3, max_value=30, required=False, default=15)
+    player_live_duration_infinity = serializers.BooleanField(required=False, default=True)
+    player_manifest_loading_max_retry = serializers.IntegerField(min_value=0, max_value=10, required=False, default=3)
+    player_level_loading_max_retry = serializers.IntegerField(min_value=0, max_value=10, required=False, default=3)
+    player_frag_loading_max_retry = serializers.IntegerField(min_value=0, max_value=10, required=False, default=3)
 
     def validate_segment_duration(self, value):
         if value < 2:

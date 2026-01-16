@@ -415,25 +415,38 @@ class CoreSettings(models.Model):
     def get_hls_output_settings(cls):
         """Retrieve HLS output settings as dict (or return defaults if not found)."""
         import json
+        # Default values for all HLS settings
+        defaults = {
+            # FFmpeg output settings
+            "output_path": "/data/hls",
+            "segment_duration": 6,
+            "playlist_size": 10,
+            "retention_seconds": 0,
+            "ll_hls_enabled": False,
+            "use_fmp4_segments": False,
+            "shutdown_delay": 30,
+            # HLS.js player settings - optimized for standard HLS (not LL-HLS)
+            "player_enable_worker": True,
+            "player_low_latency_mode": False,  # Disabled by default for stability
+            "player_back_buffer_length": 30,
+            "player_max_buffer_length": 30,
+            "player_max_max_buffer_length": 60,
+            "player_live_sync_duration_count": 4,  # Segments behind live edge
+            "player_live_max_latency_duration_count": 15,  # Max latency before seeking
+            "player_live_duration_infinity": True,
+            "player_manifest_loading_max_retry": 3,
+            "player_level_loading_max_retry": 3,
+            "player_frag_loading_max_retry": 3,
+        }
         try:
             settings_json = cls.objects.get(key=HLS_OUTPUT_SETTINGS_KEY).value
             settings = json.loads(settings_json)
-            # Ensure shutdown_delay has a default if not present
-            if "shutdown_delay" not in settings:
-                settings["shutdown_delay"] = 30
-            return settings
+            # Merge with defaults to ensure all keys are present
+            merged = {**defaults, **settings}
+            return merged
         except (cls.DoesNotExist, json.JSONDecodeError):
             # Return defaults if not found or invalid JSON
-            # Note: playlist_size default is 10 to match apps/output/hls/config.py
-            return {
-                "output_path": "/data/hls",
-                "segment_duration": 6,
-                "playlist_size": 10,
-                "retention_seconds": 0,
-                "ll_hls_enabled": False,
-                "use_fmp4_segments": False,
-                "shutdown_delay": 30,  # HLS-specific shutdown delay (seconds)
-            }
+            return defaults
 
     @classmethod
     def set_hls_output_settings(cls, settings_dict):

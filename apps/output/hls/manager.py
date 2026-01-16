@@ -631,8 +631,8 @@ class HLSChannelSession:
             "-hls_flags", hls_flags,
             # Prevent client caching issues during channel changes
             "-hls_allow_cache", "0",
-            # Use epoch-based segment numbering for unique numbers across restarts
-            "-hls_start_number_source", "epoch",
+            # Use default sequential numbering (0, 1, 2, ...)
+            # No -hls_start_number_source means segments start at 0
             "-hls_segment_filename", segment_pattern,
         ]
 

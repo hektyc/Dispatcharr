@@ -5,6 +5,22 @@ import useVideoStore from '../store/useVideoStore';
 import mpegts from 'mpegts.js';
 import Hls from 'hls.js';
 import { CloseButton, Flex, Loader, Text, Box } from '@mantine/core';
+import API from '../api';
+
+// Default HLS.js player settings (used if API fetch fails)
+const DEFAULT_HLS_PLAYER_SETTINGS = {
+  player_enable_worker: true,
+  player_low_latency_mode: false,
+  player_back_buffer_length: 30,
+  player_max_buffer_length: 30,
+  player_max_max_buffer_length: 60,
+  player_live_sync_duration_count: 4,
+  player_live_max_latency_duration_count: 15,
+  player_live_duration_infinity: true,
+  player_manifest_loading_max_retry: 3,
+  player_level_loading_max_retry: 3,
+  player_frag_loading_max_retry: 3,
+};
 
 export default function FloatingVideo() {
   const isVisible = useVideoStore((s) => s.isVisible);
@@ -29,6 +45,8 @@ export default function FloatingVideo() {
   const dragPositionRef = useRef(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const initialPositionRef = useRef(null);
+  // HLS.js player settings from backend
+  const hlsSettingsRef = useRef(DEFAULT_HLS_PLAYER_SETTINGS);
 
   const MIN_WIDTH = 220;
   const MIN_HEIGHT = 124;
@@ -383,6 +401,26 @@ export default function FloatingVideo() {
     }
   };
 
+  // Fetch HLS settings from backend on mount
+  useEffect(() => {
+    const fetchHlsSettings = async () => {
+      try {
+        const settings = await API.getHLSSettings();
+        if (settings) {
+          // Update the ref with fetched settings (merge with defaults)
+          hlsSettingsRef.current = {
+            ...DEFAULT_HLS_PLAYER_SETTINGS,
+            ...settings,
+          };
+          console.log('Loaded HLS player settings:', hlsSettingsRef.current);
+        }
+      } catch (error) {
+        console.warn('Failed to load HLS settings, using defaults:', error);
+      }
+    };
+    fetchHlsSettings();
+  }, []);
+
   // Initialize HLS player (HLS.js)
   const initializeHLSPlayer = () => {
     if (!videoRef.current || !streamUrl) return;
@@ -393,23 +431,27 @@ export default function FloatingVideo() {
     console.log('Initializing HLS player for:', streamUrl);
 
     const video = videoRef.current;
+    const settings = hlsSettingsRef.current;
 
     // Check if HLS.js is supported
     if (Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-        backBufferLength: 30,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 10,
-        liveDurationInfinity: true,
-        // Retry settings
-        manifestLoadingMaxRetry: 3,
-        levelLoadingMaxRetry: 3,
-        fragLoadingMaxRetry: 3,
-      });
+      // Build HLS.js config from backend settings
+      const hlsConfig = {
+        enableWorker: settings.player_enable_worker,
+        lowLatencyMode: settings.player_low_latency_mode,
+        backBufferLength: settings.player_back_buffer_length,
+        maxBufferLength: settings.player_max_buffer_length,
+        maxMaxBufferLength: settings.player_max_max_buffer_length,
+        liveSyncDurationCount: settings.player_live_sync_duration_count,
+        liveMaxLatencyDurationCount: settings.player_live_max_latency_duration_count,
+        liveDurationInfinity: settings.player_live_duration_infinity,
+        manifestLoadingMaxRetry: settings.player_manifest_loading_max_retry,
+        levelLoadingMaxRetry: settings.player_level_loading_max_retry,
+        fragLoadingMaxRetry: settings.player_frag_loading_max_retry,
+      };
+
+      console.log('HLS.js config:', hlsConfig);
+      const hls = new Hls(hlsConfig);
 
       hls.loadSource(streamUrl);
       hls.attachMedia(video);
