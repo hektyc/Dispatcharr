@@ -401,8 +401,11 @@ export default function FloatingVideo() {
     }
   };
 
-  // Fetch HLS settings from backend on mount
+  // Fetch HLS settings from backend when video becomes visible
+  // Only fetch when isVisible is true to avoid auth errors on login screen
   useEffect(() => {
+    if (!isVisible) return;
+
     const fetchHlsSettings = async () => {
       try {
         const settings = await API.getHLSSettings();
@@ -419,7 +422,7 @@ export default function FloatingVideo() {
       }
     };
     fetchHlsSettings();
-  }, []);
+  }, [isVisible]);
 
   // Initialize HLS player (HLS.js)
   const initializeHLSPlayer = () => {
