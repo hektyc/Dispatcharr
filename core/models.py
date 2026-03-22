@@ -45,7 +45,7 @@ class StreamProfile(models.Model):
         blank=True,
     )
     parameters = models.TextField(
-        help_text="Command-line parameters. Use {userAgent} and {streamUrl} as placeholders.",
+        help_text="Command-line parameters. Use {userAgent}, {streamUrl}, and {hlsOutputPath} as placeholders.",
         blank=True,
     )
     locked = models.BooleanField(
@@ -124,7 +124,7 @@ class StreamProfile(models.Model):
             return True
         return False
 
-    def build_command(self, stream_url, user_agent):
+    def build_command(self, stream_url, user_agent, hls_output_path=None):
         if self.is_proxy():
             return []
 
@@ -132,6 +132,8 @@ class StreamProfile(models.Model):
             "{streamUrl}": stream_url,
             "{userAgent}": user_agent,
         }
+        if hls_output_path:
+            replacements["{hlsOutputPath}"] = hls_output_path
 
         # Split the command and iterate through each part to apply replacements
         cmd = [self.command] + [
@@ -140,6 +142,10 @@ class StreamProfile(models.Model):
         ]
 
         return cmd
+
+    def is_hls_profile(self):
+        """Check if this profile uses the {hlsOutputPath} placeholder."""
+        return "{hlsOutputPath}" in self.parameters
 
     def _replace_in_part(self, part, replacements):
         # Iterate through the replacements and replace each part of the string

@@ -13,6 +13,7 @@ import {
   Paper,
   Flex,
   Button,
+  Badge,
   useMantineTheme,
   Center,
   Switch,
@@ -73,17 +74,30 @@ const StreamProfiles = () => {
         header: 'Name',
         accessorKey: 'name',
         size: 175,
-        cell: ({ cell }) => (
-          <div
-            style={{
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-            }}
-          >
-            {cell.getValue()}
-          </div>
-        ),
+        cell: ({ cell, row }) => {
+          const isHls =
+            row.original.parameters &&
+            row.original.parameters.includes('{hlsOutputPath}');
+          return (
+            <div
+              style={{
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              {cell.getValue()}
+              {isHls && (
+                <Badge size="xs" color="teal" variant="filled">
+                  HLS
+                </Badge>
+              )}
+            </div>
+          );
+        },
       },
       {
         header: 'Command',

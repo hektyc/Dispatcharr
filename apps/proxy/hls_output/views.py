@@ -299,7 +299,7 @@ def next_stream(request, channel_uuid):
 
         # Get user agent
         user_agent = "VLC/3.0.20 LibVLC/3.0.20"
-        profile = channel.get_active_stream_profile()
+        profile = channel.get_stream_profile()
         if profile and profile.user_agent:
             user_agent = profile.user_agent.user_agent
 

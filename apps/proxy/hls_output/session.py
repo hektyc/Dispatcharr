@@ -39,15 +39,19 @@ class HLSSession:
     and integrates with the storage backend.
     """
 
-    def __init__(self, channel_uuid: str, storage):
+    def __init__(self, channel_uuid: str, storage, stream_profile=None):
         """Initialize session.
 
         Args:
             channel_uuid: The channel identifier.
             storage: A SegmentStore instance for this channel.
+            stream_profile: Optional StreamProfile instance for command building.
+                If the profile contains {hlsOutputPath}, it will be used to
+                build the FFmpeg command. Otherwise, falls back to the internal builder.
         """
         self.channel_uuid = channel_uuid
         self.storage = storage
+        self._stream_profile = stream_profile
         self._process = None
         self._monitor_thread = None
         self._stderr_thread = None
@@ -229,9 +233,30 @@ class HLSSession:
     def _build_ffmpeg_command(self, stream_url: str, user_agent: str, output_path: str) -> list:
         """Build the FFmpeg command for HLS output.
 
-        Constructs the command internally using HLS settings from config.
-        No dependency on StreamProfile.build_command().
+        If a stream profile with {hlsOutputPath} is available, delegates to
+        StreamProfile.build_command(). Otherwise, falls back to the internal
+        command builder using HLS settings from config.
         """
+        # Use stream profile if it's HLS-aware
+        if self._stream_profile and self._stream_profile.is_hls_profile():
+            try:
+                cmd = self._stream_profile.build_command(
+                    stream_url, user_agent, hls_output_path=output_path
+                )
+                if cmd:
+                    logger.info(
+                        "Using stream profile '%s' for HLS output on channel %s",
+                        self._stream_profile.name, self.channel_uuid,
+                    )
+                    return cmd
+            except Exception as e:
+                logger.warning(
+                    "Stream profile build_command() failed for channel %s, "
+                    "falling back to internal builder: %s",
+                    self.channel_uuid, e,
+                )
+
+        # Fallback: build command internally from HLS config settings
         settings = hls_config._load_settings()
         segment_duration = settings.get("segment_duration", 6)
         playlist_size = settings.get("playlist_size", 10)

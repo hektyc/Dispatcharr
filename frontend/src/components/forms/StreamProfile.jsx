@@ -159,6 +159,10 @@ const StreamProfile = ({ profile = null, isOpen, onClose }) => {
                 Use <strong>{'{streamUrl}'}</strong> and{' '}
                 <strong>{'{userAgent}'}</strong> as placeholders — they are
                 substituted at stream time.
+                <br />
+                For HLS output profiles, also use{' '}
+                <strong>{'{hlsOutputPath}'}</strong> for the segment/playlist
+                output directory.
                 {COMMAND_EXAMPLES[commandSelection] && (
                   <>
                     <br />

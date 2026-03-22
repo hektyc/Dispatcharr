@@ -61,57 +61,82 @@ def get_channel_or_stream(identifier: str):
 
 
 def get_direct_stream_url(channel):
-    """Get the direct stream URL for a channel.
+    """Get the direct stream URL, user agent, and stream profile for a channel.
 
-    Follows the channel's stream selection to find the actual URL.
+    Follows the channel's stream selection to find the actual URL
+    and resolves the channel's stream profile for HLS command building.
 
     Args:
         channel: A Channel model instance.
 
     Returns:
-        Tuple of (url, user_agent_string) or (None, None).
+        Tuple of (url, user_agent_string, stream_profile) or (None, None, None).
     """
     try:
         # channel.streams is a ManyToManyField through ChannelStream,
         # .first() returns a Stream instance directly
         stream = channel.streams.first()
         if not stream:
-            return None, None
+            return None, None, None
 
         # Get the stream URL
         url = stream.url
         if not url:
-            return None, None
+            return None, None, None
 
-        # Get user agent
+        # Get the channel's stream profile (handles fallback to default)
+        profile = channel.get_stream_profile()
+
+        # Get user agent from the profile, or use a sensible default
         user_agent = "VLC/3.0.20 LibVLC/3.0.20"
-        profile = channel.get_active_stream_profile()
         if profile and profile.user_agent:
             user_agent = profile.user_agent.user_agent
 
-        return url, user_agent
+        return url, user_agent, profile
     except Exception as e:
         logger.error("Failed to get stream URL for channel %s: %s", channel.uuid, e)
-        return None, None
+        return None, None, None
 
 
 def get_direct_stream_url_for_stream(stream):
-    """Get the direct URL for a specific stream.
+    """Get the direct URL, user agent, and stream profile for a specific stream.
 
     Args:
         stream: A Stream model instance.
 
     Returns:
-        Tuple of (url, user_agent_string) or (None, None).
+        Tuple of (url, user_agent_string, stream_profile) or (None, None, None).
     """
     try:
         url = stream.url
         if not url:
-            return None, None
-        return url, "VLC/3.0.20 LibVLC/3.0.20"
+            return None, None, None
+
+        # Get the default HLS profile for standalone streams
+        profile = _get_default_hls_profile()
+
+        user_agent = "VLC/3.0.20 LibVLC/3.0.20"
+        if profile and profile.user_agent:
+            user_agent = profile.user_agent.user_agent
+
+        return url, user_agent, profile
     except Exception as e:
         logger.error("Failed to get stream URL: %s", e)
-        return None, None
+        return None, None, None
+
+
+def _get_default_hls_profile():
+    """Get the built-in 'HLS FFmpeg' stream profile.
+
+    Returns:
+        A StreamProfile instance, or None if not found.
+    """
+    try:
+        from core.models import StreamProfile
+        return StreamProfile.objects.filter(name="HLS FFmpeg", locked=True).first()
+    except Exception as e:
+        logger.error("Failed to load HLS FFmpeg profile: %s", e)
+        return None
 
 
 def _create_storage(channel_uuid: str):
@@ -275,12 +300,13 @@ class HLSOutputManager:
                 logger.info("Could not acquire ownership for %s", channel_uuid)
                 return None
 
-            # Look up channel and get stream URL
+            # Look up channel and get stream URL + profile
             channel, stream = get_channel_or_stream(channel_uuid)
+            stream_profile = None
             if channel:
-                url, user_agent = get_direct_stream_url(channel)
+                url, user_agent, stream_profile = get_direct_stream_url(channel)
             elif stream:
-                url, user_agent = get_direct_stream_url_for_stream(stream)
+                url, user_agent, stream_profile = get_direct_stream_url_for_stream(stream)
             else:
                 logger.error("Channel/stream not found: %s", channel_uuid)
                 self._release_ownership(channel_uuid)
@@ -291,9 +317,15 @@ class HLSOutputManager:
                 self._release_ownership(channel_uuid)
                 return None
 
+            # If the channel's profile isn't HLS-aware, use the default HLS profile
+            if stream_profile and not stream_profile.is_hls_profile():
+                hls_profile = _get_default_hls_profile()
+                if hls_profile:
+                    stream_profile = hls_profile
+
             # Create storage and session
             storage = _create_storage(channel_uuid)
-            session = HLSSession(channel_uuid, storage)
+            session = HLSSession(channel_uuid, storage, stream_profile=stream_profile)
 
             if session.start(url, user_agent):
                 self._sessions[channel_uuid] = session
