@@ -42,6 +42,9 @@ const SystemSettingsForm = React.lazy(
 const NavOrderForm = React.lazy(
   () => import('../components/forms/settings/NavOrderForm.jsx')
 );
+const HlsOutputSettingsForm = React.lazy(
+  () => import('../components/forms/settings/HlsOutputSettingsForm.jsx')
+);
 
 const SettingsPage = () => {
   const authUser = useAuthStore((s) => s.user);
@@ -184,6 +187,19 @@ const SettingsPage = () => {
                     <Suspense fallback={<Loader />}>
                       <ProxySettingsForm
                         active={accordianValue === 'proxy-settings'}
+                      />
+                    </Suspense>
+                  </ErrorBoundary>
+                </AccordionPanel>
+              </AccordionItem>
+
+              <AccordionItem value="hls-output-settings">
+                <AccordionControl>HLS Output</AccordionControl>
+                <AccordionPanel>
+                  <ErrorBoundary>
+                    <Suspense fallback={<Loader />}>
+                      <HlsOutputSettingsForm
+                        active={accordianValue === 'hls-output-settings'}
                       />
                     </Suspense>
                   </ErrorBoundary>

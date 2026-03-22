@@ -124,6 +124,32 @@ class ProxySettingsSerializer(serializers.Serializer):
         return value
 
 
+class HLSOutputSettingsSerializer(serializers.Serializer):
+    """Serializer for HLS output settings stored as JSON in CoreSettings."""
+    storage_backend = serializers.ChoiceField(
+        choices=[("filesystem", "Filesystem"), ("redis", "Redis")],
+        default="filesystem",
+    )
+    segment_duration = serializers.IntegerField(min_value=1, max_value=30, default=6)
+    playlist_size = serializers.IntegerField(min_value=3, max_value=50, default=10)
+    shutdown_delay = serializers.IntegerField(min_value=0, max_value=300, default=30)
+    ll_hls_enabled = serializers.BooleanField(default=False, required=False)
+    use_fmp4_segments = serializers.BooleanField(default=False, required=False)
+    redis_segment_ttl = serializers.IntegerField(min_value=30, max_value=600, default=120)
+
+    # HLS.js Player settings (served to frontend)
+    enable_worker = serializers.BooleanField(default=True, required=False)
+    low_latency_mode = serializers.BooleanField(default=False, required=False)
+    back_buffer_length = serializers.IntegerField(min_value=0, max_value=300, default=30, required=False)
+    max_buffer_length = serializers.IntegerField(min_value=5, max_value=120, default=30, required=False)
+    max_max_buffer_length = serializers.IntegerField(min_value=10, max_value=300, default=60, required=False)
+    max_buffer_size = serializers.IntegerField(min_value=1000000, max_value=200000000, default=60000000, required=False)
+    max_buffer_hole = serializers.FloatField(min_value=0.0, max_value=5.0, default=0.5, required=False)
+    level_loading_max_retry = serializers.IntegerField(min_value=0, max_value=20, default=4, required=False)
+    frag_loading_max_retry = serializers.IntegerField(min_value=0, max_value=20, default=6, required=False)
+    manifest_loading_max_retry = serializers.IntegerField(min_value=0, max_value=20, default=4, required=False)
+
+
 class SystemNotificationSerializer(serializers.ModelSerializer):
     """Serializer for system notifications."""
     is_dismissed = serializers.SerializerMethodField()

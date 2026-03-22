@@ -175,3 +175,77 @@ class HDHRDeviceXMLAPIView(APIView):
         </root>"""
 
         return HttpResponse(xml_response, content_type="application/xml")
+
+
+# ============================================
+# HLS HDHR Endpoints
+# ============================================
+
+class HLSDiscoverAPIView(APIView):
+    """Returns HDHR device discovery information with HLS stream URLs."""
+
+    @extend_schema(
+        description="Retrieve the HDHomeRun HLS device discovery information",
+    )
+    def get(self, request):
+        base_url = request.build_absolute_uri("/hdhr-hls/").rstrip("/")
+        data = {
+            "FriendlyName": "Dispatcharr HLS",
+            "Manufacturer": "Dispatcharr",
+            "ModelNumber": "HDTC-HLS",
+            "FirmwareName": "dispatcharr_hls",
+            "FirmwareVersion": "1.0",
+            "DeviceID": "DISPATCHARR-HLS",
+            "DeviceAuth": "dispatcharr_hls_auth",
+            "BaseURL": base_url,
+            "LineupURL": f"{base_url}/lineup.json",
+        }
+        return JsonResponse(data)
+
+
+class HLSLineupAPIView(APIView):
+    """Returns the HDHR channel lineup with HLS stream URLs."""
+
+    @extend_schema(
+        description="Retrieve the HDHomeRun HLS channel lineup",
+    )
+    def get(self, request, profile=None):
+        base_url = request.build_absolute_uri("/").rstrip("/")
+        lineup = []
+
+        channels = Channel.objects.filter(
+            channel_number__isnull=False
+        ).order_by("channel_number")
+
+        for channel in channels:
+            lineup.append({
+                "GuideNumber": str(channel.channel_number),
+                "GuideName": channel.name,
+                "URL": f"{base_url}/proxy/hls_output/{channel.uuid}/playlist.m3u8",
+            })
+
+        return JsonResponse(lineup, safe=False)
+
+
+class HLSHDHRDeviceXMLAPIView(APIView):
+    """Returns HDHomeRun device configuration in XML for HLS mode."""
+
+    @extend_schema(
+        description="Retrieve the HDHomeRun HLS device XML configuration",
+    )
+    def get(self, request):
+        base_url = request.build_absolute_uri("/hdhr-hls/").rstrip("/")
+
+        xml_response = f"""<?xml version="1.0" encoding="utf-8"?>
+        <root>
+            <DeviceID>DISPATCHARR-HLS</DeviceID>
+            <FriendlyName>Dispatcharr HLS</FriendlyName>
+            <ModelNumber>HDTC-HLS</ModelNumber>
+            <FirmwareName>dispatcharr_hls</FirmwareName>
+            <FirmwareVersion>1.0</FirmwareVersion>
+            <DeviceAuth>dispatcharr_hls_auth</DeviceAuth>
+            <BaseURL>{base_url}</BaseURL>
+            <LineupURL>{base_url}/lineup.json</LineupURL>
+        </root>"""
+
+        return HttpResponse(xml_response, content_type="application/xml")

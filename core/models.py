@@ -156,6 +156,7 @@ PROXY_SETTINGS_KEY = "proxy_settings"
 NETWORK_ACCESS_KEY = "network_access"
 SYSTEM_SETTINGS_KEY = "system_settings"
 EPG_SETTINGS_KEY = "epg_settings"
+HLS_OUTPUT_SETTINGS_KEY = "hls_output_settings"
 
 
 class CoreSettings(models.Model):
@@ -361,6 +362,29 @@ class CoreSettings(models.Model):
         value = (tz_name or "").strip() or getattr(settings, "TIME_ZONE", "UTC") or "UTC"
         cls._update_group(SYSTEM_SETTINGS_KEY, "System Settings", {"time_zone": value})
         return value
+
+    # HLS Output Settings
+    @classmethod
+    def get_hls_output_settings(cls):
+        """Get all HLS output-related settings."""
+        return cls._get_group(HLS_OUTPUT_SETTINGS_KEY, {
+            "storage_backend": "filesystem",
+            "segment_duration": 6,
+            "playlist_size": 10,
+            "shutdown_delay": 30,
+            "ll_hls_enabled": False,
+            "use_fmp4_segments": False,
+            "redis_segment_ttl": 120,
+        })
+
+    @classmethod
+    def update_hls_output_settings(cls, updates):
+        """Update HLS output settings."""
+        return cls._update_group(
+            HLS_OUTPUT_SETTINGS_KEY,
+            "HLS Output Settings",
+            updates,
+        )
 
 
 class SystemEvent(models.Model):

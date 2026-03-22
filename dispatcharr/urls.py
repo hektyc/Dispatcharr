@@ -23,6 +23,7 @@ urlpatterns = [
     # HDHR
     path("hdhr", RedirectView.as_view(url="/hdhr/", permanent=True)),
     path("hdhr/", include(("apps.hdhr.urls", "hdhr"), namespace="hdhr")),
+    path("hdhr-hls/", include("apps.hdhr.hls_urls")),
     # Add proxy apps - Move these before the catch-all
     path("proxy/", include(("apps.proxy.urls", "proxy"), namespace="proxy")),
     path("proxy", RedirectView.as_view(url="/proxy/", permanent=True)),

@@ -7,6 +7,7 @@ from .api_views import (
     StreamProfileViewSet,
     CoreSettingsViewSet,
     SystemNotificationViewSet,
+    HLSOutputSettingsViewSet,
     environment,
     version,
     rehash_streams_endpoint,
@@ -19,6 +20,7 @@ router.register(r'useragents', UserAgentViewSet, basename='useragent')
 router.register(r'streamprofiles', StreamProfileViewSet, basename='streamprofile')
 router.register(r'settings', CoreSettingsViewSet, basename='coresettings')
 router.register(r'notifications', SystemNotificationViewSet, basename='systemnotification')
+router.register(r'hls-output-settings', HLSOutputSettingsViewSet, basename='hls-output-settings')
 urlpatterns = [
     path('settings/env/', environment, name='token_refresh'),
     path('version/', version, name='version'),

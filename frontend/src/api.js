@@ -1693,6 +1693,28 @@ export default class API {
     }
   }
 
+  // HLS Output Settings API
+  static async getHLSOutputSettings() {
+    try {
+      const response = await request(`${host}/api/core/hls-output-settings/`);
+      return response;
+    } catch (e) {
+      errorNotification('Failed to retrieve HLS output settings', e);
+    }
+  }
+
+  static async updateHLSOutputSettings(settings) {
+    try {
+      const response = await request(`${host}/api/core/hls-output-settings/1/`, {
+        method: 'PUT',
+        body: JSON.stringify(settings),
+      });
+      return response;
+    } catch (e) {
+      errorNotification('Failed to update HLS output settings', e);
+    }
+  }
+
   // Backup API (async with Celery task polling)
   static async listBackups() {
     try {

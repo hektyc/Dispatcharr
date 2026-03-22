@@ -82,6 +82,17 @@ const useSettingsStore = create((set, get) => ({
     set((state) => ({
       settings: { ...state.settings, [setting.key]: setting },
     })),
+
+  // Stream format preference (ts or hls)
+  streamFormat: 'ts',
+  setStreamFormat: (format) => set({ streamFormat: format }),
+  getChannelUrl: (channelUuid, baseUrl) => {
+    const { streamFormat } = get();
+    if (streamFormat === 'hls') {
+      return `${baseUrl}/proxy/hls_output/${channelUuid}/playlist.m3u8`;
+    }
+    return `${baseUrl}/proxy/ts/stream/${channelUuid}`;
+  },
 }));
 
 export default useSettingsStore;
