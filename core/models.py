@@ -45,7 +45,12 @@ class StreamProfile(models.Model):
         blank=True,
     )
     parameters = models.TextField(
-        help_text="Command-line parameters. Use {userAgent}, {streamUrl}, and {hlsOutputPath} as placeholders.",
+        help_text=(
+            "Command-line parameters. Use {userAgent}, {streamUrl}, and "
+            "{hlsOutputPath} as placeholders. For HLS profiles, also use "
+            "{hlsSegmentDuration} and {hlsPlaylistSize} to pull values "
+            "from HLS Output Settings."
+        ),
         blank=True,
     )
     locked = models.BooleanField(
@@ -124,7 +129,7 @@ class StreamProfile(models.Model):
             return True
         return False
 
-    def build_command(self, stream_url, user_agent, hls_output_path=None):
+    def build_command(self, stream_url, user_agent, hls_output_path=None, hls_settings=None):
         if self.is_proxy():
             return []
 
@@ -134,6 +139,13 @@ class StreamProfile(models.Model):
         }
         if hls_output_path:
             replacements["{hlsOutputPath}"] = hls_output_path
+        if hls_settings:
+            replacements["{hlsSegmentDuration}"] = str(
+                hls_settings.get("segment_duration", 6)
+            )
+            replacements["{hlsPlaylistSize}"] = str(
+                hls_settings.get("playlist_size", 10)
+            )
 
         # Split the command and iterate through each part to apply replacements
         cmd = [self.command] + [

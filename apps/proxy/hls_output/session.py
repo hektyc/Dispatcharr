@@ -244,8 +244,12 @@ class HLSSession:
         # Use stream profile if it's HLS-aware
         if self._stream_profile and self._stream_profile.is_hls_profile():
             try:
+                # Pass HLS settings so dynamic placeholders are resolved
+                settings = hls_config._load_settings()
                 cmd = self._stream_profile.build_command(
-                    stream_url, user_agent, hls_output_path=output_path
+                    stream_url, user_agent,
+                    hls_output_path=output_path,
+                    hls_settings=settings,
                 )
                 if cmd:
                     logger.info(

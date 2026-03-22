@@ -162,7 +162,10 @@ const StreamProfile = ({ profile = null, isOpen, onClose }) => {
                 <br />
                 For HLS output profiles, also use{' '}
                 <strong>{'{hlsOutputPath}'}</strong> for the segment/playlist
-                output directory.
+                output directory,{' '}
+                <strong>{'{hlsSegmentDuration}'}</strong> and{' '}
+                <strong>{'{hlsPlaylistSize}'}</strong> to pull values from
+                HLS Output Settings.
                 {COMMAND_EXAMPLES[commandSelection] && (
                   <>
                     <br />
