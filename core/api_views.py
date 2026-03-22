@@ -327,14 +327,6 @@ class HLSOutputSettingsViewSet(viewsets.ViewSet):
 
         return Response(serializer.validated_data)
 
-    @action(detail=False, methods=['get', 'patch'])
-    def settings(self, request):
-        """Get or update HLS output settings."""
-        if request.method == 'GET':
-            return self.list(request)
-        elif request.method == 'PATCH':
-            return self.partial_update(request)
-
 
 @extend_schema(
     description="Endpoint for environment details",
