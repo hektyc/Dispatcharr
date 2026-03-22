@@ -70,3 +70,7 @@ class MyWebSocketConsumer(AsyncWebsocketConsumer):
 
     async def update(self, event):
         await self.send(text_data=json.dumps(event))
+
+    async def hls_client_update(self, event):
+        """Handle HLS client count updates from the HLS client manager."""
+        await self.send(text_data=json.dumps(event))

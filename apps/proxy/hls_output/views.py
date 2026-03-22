@@ -180,7 +180,12 @@ def hls_segment(request, channel_uuid, segment_name):
     """
     session = hls_manager.get_session(channel_uuid)
     if not session:
-        return HttpResponse("No active HLS session", status=404)
+        # On multi-worker setups, this worker may not have the session yet.
+        # Try get_or_start_session() which will create a proxy session if
+        # the session is running on another worker.
+        session = hls_manager.get_or_start_session(channel_uuid)
+        if not session:
+            return HttpResponse("No active HLS session", status=404)
 
     # Update client activity
     client_id = _get_client_id(request)

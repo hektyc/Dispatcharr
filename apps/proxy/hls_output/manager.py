@@ -126,16 +126,21 @@ def get_direct_stream_url_for_stream(stream):
 
 
 def _get_default_hls_profile():
-    """Get the built-in 'HLS FFmpeg' stream profile.
+    """Get a built-in HLS stream profile.
+
+    Tries 'HLS FFmpeg' first, then falls back to 'HLS Proxy'.
 
     Returns:
         A StreamProfile instance, or None if not found.
     """
     try:
         from core.models import StreamProfile
-        return StreamProfile.objects.filter(name="HLS FFmpeg", locked=True).first()
+        profile = StreamProfile.objects.filter(name="HLS FFmpeg", locked=True).first()
+        if not profile:
+            profile = StreamProfile.objects.filter(name="HLS Proxy", locked=True).first()
+        return profile
     except Exception as e:
-        logger.error("Failed to load HLS FFmpeg profile: %s", e)
+        logger.error("Failed to load default HLS profile: %s", e)
         return None
 
 
