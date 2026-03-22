@@ -12,7 +12,6 @@ import {
   Loader,
   Alert,
 } from '@mantine/core';
-import { IconInfoCircle } from '@tabler/icons-react';
 import API from '../../../api';
 
 const HlsOutputSettingsForm = ({ active }) => {
