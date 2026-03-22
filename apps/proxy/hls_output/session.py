@@ -127,6 +127,10 @@ class HLSSession:
 
         os.makedirs(output_path, exist_ok=True)
 
+        # Clean up stale HLS files from previous runs to prevent
+        # append_list from referencing old non-existent segments
+        self._cleanup_stale_hls_files(output_path)
+
         # Build and start FFmpeg command
         cmd = self._build_ffmpeg_command(stream_url, self._user_agent, output_path)
         logger.info(
@@ -309,6 +313,37 @@ class HLSSession:
         cmd.append(os.path.join(output_path, "index.m3u8"))
 
         return cmd
+
+    @staticmethod
+    def _cleanup_stale_hls_files(output_path: str):
+        """Remove stale HLS files from a previous session run.
+
+        This prevents the append_list HLS flag from referencing old
+        segment indices that no longer exist on disk after a restart.
+        """
+        import glob
+
+        try:
+            patterns = [
+                os.path.join(output_path, "index*.ts"),
+                os.path.join(output_path, "index*.m4s"),
+                os.path.join(output_path, "index.m3u8"),
+                os.path.join(output_path, "init.mp4"),
+            ]
+            removed = 0
+            for pattern in patterns:
+                for f in glob.glob(pattern):
+                    try:
+                        os.remove(f)
+                        removed += 1
+                    except OSError:
+                        pass
+            if removed:
+                logger.debug(
+                    "Cleaned up %d stale HLS files from %s", removed, output_path
+                )
+        except Exception as e:
+            logger.warning("Failed to clean up stale HLS files: %s", e)
 
     @staticmethod
     def _is_source_hls(url: str) -> bool:

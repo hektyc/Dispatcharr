@@ -1707,7 +1707,7 @@ export default class API {
     try {
       const response = await request(`${host}/api/core/hls-output-settings/1/`, {
         method: 'PUT',
-        body: JSON.stringify(settings),
+        body: settings,
       });
       return response;
     } catch (e) {
