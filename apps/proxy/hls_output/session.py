@@ -257,12 +257,19 @@ class HLSSession:
         # Clean up storage
         self.storage.cleanup_channel(self.channel_uuid)
 
+        # Clean up HLS output directory (segment files, playlist, etc.)
+        self._cleanup_output_directory()
+
         # Update DB stats one last time
         self._update_stream_stats_in_db()
 
-        # Set stopped state and clean up metadata
-        self._set_channel_state(ChannelState.STOPPED)
-        self._cleanup_unified_metadata()
+        # Delete unified metadata and client set immediately so the
+        # Stats page stops showing this channel right away.
+        self._delete_unified_metadata()
+
+        # Trigger a final channel_stats WebSocket push so the frontend
+        # removes the stats card without waiting for the next poll.
+        self._trigger_final_stats_update()
 
         logger.info("HLS output stopped for channel %s", self.channel_uuid)
 
@@ -347,16 +354,51 @@ class HLSSession:
         except Exception:
             pass
 
-    def _cleanup_unified_metadata(self):
-        """Remove the unified metadata hash after stop (with a short grace TTL)."""
+    def _delete_unified_metadata(self):
+        """Delete the unified metadata hash and client set immediately on stop.
+
+        This ensures the Stats page removes the channel card right away
+        rather than keeping it visible during a grace TTL period.
+        """
         try:
             rc = self.redis_client
             if rc is None:
                 return
-            # Keep for 30s after stop so Stats page shows final state
-            rc.expire(self._metadata_key, 30)
-        except Exception:
-            pass
+            # Delete metadata hash
+            rc.delete(self._metadata_key)
+            # Delete client set so the channel won't be discovered by Stats scan
+            client_set_key = f"ts_proxy:channel:{self.channel_uuid}:clients"
+            rc.delete(client_set_key)
+            # Clean up any individual client data keys
+            cursor = 0
+            client_key_pattern = f"ts_proxy:channel:{self.channel_uuid}:clients:*"
+            while True:
+                cursor, keys = rc.scan(cursor, match=client_key_pattern, count=50)
+                if keys:
+                    rc.delete(*keys)
+                if cursor == 0:
+                    break
+        except Exception as e:
+            logger.debug("Failed to delete unified metadata for %s: %s", self.channel_uuid, e)
+
+    def _cleanup_output_directory(self):
+        """Delete the HLS output directory and all its contents."""
+        try:
+            import shutil
+            output_path = self.output_path
+            if output_path and os.path.isdir(output_path):
+                shutil.rmtree(output_path, ignore_errors=True)
+                logger.debug("Cleaned up HLS output directory: %s", output_path)
+        except Exception as e:
+            logger.debug("Failed to clean up HLS output directory: %s", e)
+
+    def _trigger_final_stats_update(self):
+        """Push a final channel_stats WebSocket update so the frontend drops the card."""
+        try:
+            from .client_manager import hls_client_manager
+            hls_client_manager._trigger_stats_update()
+        except Exception as e:
+            logger.debug("Failed to trigger final stats update: %s", e)
 
     # ------------------------------------------------------------------ #
     #  Legacy per-key metadata (kept for backward compat with HLS status)

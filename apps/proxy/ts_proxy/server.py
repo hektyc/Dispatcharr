@@ -1306,6 +1306,13 @@ class ProxyServer:
                 try:
                     channel_id = key.decode('utf-8').split(':')[2]
 
+                    # Skip HLS channels — managed by HLS output system
+                    metadata = self.redis_client.hgetall(key)
+                    if metadata:
+                        stream_type = metadata.get(b'stream_type', b'').decode('utf-8') if b'stream_type' in metadata else ''
+                        if stream_type == 'hls':
+                            continue
+
                     # Check if this channel has an owner
                     owner = self.get_channel_owner(channel_id)
 
@@ -1361,6 +1368,12 @@ class ProxyServer:
                             self.stop_channel(channel_id)
                         else:
                             self._clean_redis_keys(channel_id)
+                        continue
+
+                    # Skip HLS channels — they are managed by the HLS output system,
+                    # not the TS proxy. Their lifecycle is handled separately.
+                    stream_type = metadata.get(b'stream_type', b'').decode('utf-8') if b'stream_type' in metadata else ''
+                    if stream_type == 'hls':
                         continue
 
                     # Get owner

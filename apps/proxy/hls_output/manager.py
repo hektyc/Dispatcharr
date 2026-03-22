@@ -404,6 +404,7 @@ class HLSOutputManager:
         if session:
             session.stop()
             hls_client_manager.unregister_shutdown_callback(channel_uuid)
+            hls_client_manager.cleanup_channel(channel_uuid)
             self._release_ownership(channel_uuid)
 
             # Log system event for channel stop

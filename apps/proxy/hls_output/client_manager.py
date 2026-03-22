@@ -314,6 +314,27 @@ class HLSClientManager:
         except Exception:
             pass
 
+    def cleanup_channel(self, channel_uuid: str):
+        """Full cleanup of a channel from the client manager on session stop.
+
+        Removes the channel from the HLS active channels set and clears
+        all local tracking state.
+        """
+        try:
+            rc = self.redis_client
+            if rc is not None:
+                # Remove from HLS active channels set
+                rc.srem(HLS_ACTIVE_CHANNELS_KEY, channel_uuid)
+                # Clear cooldown
+                cooldown_key = HLS_COOLDOWN_KEY.format(uuid=channel_uuid)
+                rc.delete(cooldown_key)
+        except Exception as e:
+            logger.debug("Failed to clean up channel %s from client manager: %s", channel_uuid, e)
+
+        # Remove from local tracking
+        with self._local_clients_lock:
+            self._local_clients.pop(channel_uuid, None)
+
     # ------------------------------------------------------------------ #
     #  Heartbeat thread
     # ------------------------------------------------------------------ #
