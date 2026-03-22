@@ -18,6 +18,15 @@ from .client_manager import hls_client_manager
 
 logger = logging.getLogger(__name__)
 
+
+def _get_redis_connection_params():
+    """Get Redis connection parameters from Django settings / environment."""
+    from django.conf import settings
+    host = os.environ.get("REDIS_HOST", getattr(settings, "REDIS_HOST", "localhost"))
+    port = int(os.environ.get("REDIS_PORT", getattr(settings, "REDIS_PORT", 6379)))
+    db = int(os.environ.get("REDIS_DB", getattr(settings, "REDIS_DB", 0)))
+    return host, port, db
+
 # Redis key patterns for ownership
 OWNER_KEY_PREFIX = "hls_output:owner:{uuid}"
 OWNER_TTL = 30  # Seconds before ownership expires
@@ -63,12 +72,11 @@ def get_direct_stream_url(channel):
         Tuple of (url, user_agent_string) or (None, None).
     """
     try:
-        channel_stream = channel.streams.first()
-        if not channel_stream:
+        # channel.streams is a ManyToManyField through ChannelStream,
+        # .first() returns a Stream instance directly
+        stream = channel.streams.first()
+        if not stream:
             return None, None
-
-        stream = channel_stream.stream
-        m3u_account = stream.m3u_account
 
         # Get the stream URL
         url = stream.url
@@ -118,7 +126,8 @@ def _create_storage(channel_uuid: str):
         import redis as redis_lib
         from .storage.redis_store import RedisSegmentStore
 
-        redis_client = redis_lib.Redis(host="redis", port=6379, db=0)
+        host, port, db = _get_redis_connection_params()
+        redis_client = redis_lib.Redis(host=host, port=port, db=db)
         return RedisSegmentStore(redis_client, ttl=hls_config.redis_segment_ttl)
     else:
         from .storage.filesystem_store import FilesystemSegmentStore
@@ -162,7 +171,8 @@ class HLSOutputManager:
         if self._redis is None:
             try:
                 import redis as redis_lib
-                self._redis = redis_lib.Redis(host="redis", port=6379, db=0)
+                host, port, db = _get_redis_connection_params()
+                self._redis = redis_lib.Redis(host=host, port=port, db=db)
             except Exception as e:
                 logger.error("Failed to connect to Redis: %s", e)
         return self._redis

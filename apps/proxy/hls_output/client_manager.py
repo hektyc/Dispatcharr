@@ -59,10 +59,15 @@ class HLSClientManager:
         if self._redis is None:
             try:
                 import redis
+                import os
+                from django.conf import settings as django_settings
+                host = os.environ.get("REDIS_HOST", getattr(django_settings, "REDIS_HOST", "localhost"))
+                port = int(os.environ.get("REDIS_PORT", getattr(django_settings, "REDIS_PORT", 6379)))
+                db = int(os.environ.get("REDIS_DB", getattr(django_settings, "REDIS_DB", 0)))
                 self._redis = redis.Redis(
-                    host="redis",
-                    port=6379,
-                    db=0,
+                    host=host,
+                    port=port,
+                    db=db,
                     decode_responses=False,
                 )
             except Exception as e:

@@ -87,7 +87,12 @@ class HLSSession:
         if self._redis is None:
             try:
                 import redis as redis_lib
-                self._redis = redis_lib.Redis(host="redis", port=6379, db=0)
+                import os
+                from django.conf import settings as django_settings
+                host = os.environ.get("REDIS_HOST", getattr(django_settings, "REDIS_HOST", "localhost"))
+                port = int(os.environ.get("REDIS_PORT", getattr(django_settings, "REDIS_PORT", 6379)))
+                db = int(os.environ.get("REDIS_DB", getattr(django_settings, "REDIS_DB", 0)))
+                self._redis = redis_lib.Redis(host=host, port=port, db=db)
             except Exception:
                 pass
         return self._redis
