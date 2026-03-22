@@ -6,6 +6,7 @@ import mpegts from 'mpegts.js';
 import Hls from 'hls.js';
 import { CloseButton, Flex, Loader, Text, Box } from '@mantine/core';
 import API from '../api';
+import useAuthStore from '../store/auth';
 import {
   applyConstraints,
   calculateNewDimensions,
@@ -119,6 +120,7 @@ export default function FloatingVideo() {
   const contentType = useVideoStore((s) => s.contentType);
   const metadata = useVideoStore((s) => s.metadata);
   const hideVideo = useVideoStore((s) => s.hideVideo);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   const videoRef = useRef(null);
   const playerRef = useRef(null);
@@ -496,8 +498,9 @@ export default function FloatingVideo() {
     return lower.endsWith('.m3u8') || lower.endsWith('.m3u');
   };
 
-  // Fetch HLS settings on mount
+  // Fetch HLS settings when authenticated
   useEffect(() => {
+    if (!isAuthenticated) return;
     API.getHLSOutputSettings()
       .then((settings) => {
         hlsSettingsRef.current = settings;
@@ -505,7 +508,7 @@ export default function FloatingVideo() {
       .catch((err) => {
         console.log('Could not load HLS settings, using defaults:', err);
       });
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (!isVisible || !streamUrl) {
