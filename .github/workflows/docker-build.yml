@@ -27,16 +27,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine image tag and branch
-        id: set-tag-branch
+      - name: Determine image tag
+        id: set-tag
         run: |
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "TAG=latest" >> $GITHUB_ENV
-            echo "BRANCH=main" >> $GITHUB_ENV
           elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
             echo "TAG=dev" >> $GITHUB_ENV
-            echo "BRANCH=dev" >> $GITHUB_ENV
           fi
+
+      - name: Generate build timestamp
+        run: echo "TIMESTAMP=$(date -u +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
 
       - name: Convert repository name to lowercase
         run: echo "REPO_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
@@ -47,10 +48,10 @@ jobs:
           context: .
           file: docker/Dockerfile
           push: true
+          pull: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            BRANCH=${{ env.BRANCH }}
-            REPO_URL=https://github.com/${{ github.repository }}
+            TIMESTAMP=${{ env.TIMESTAMP }}
           tags: |
             ghcr.io/${{ env.REPO_NAME }}:${{ env.TAG }}
             ghcr.io/${{ env.REPO_NAME }}:${{ github.sha }}

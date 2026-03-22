@@ -22,3 +22,7 @@ models
 .idea
 .vite/
 uv.lock
+
+# AI conversation exports (Cursor, Claude, etc.)
+*_202[0-9]-*T*-*-*.json
+*.conversation.json
