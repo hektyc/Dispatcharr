@@ -234,8 +234,22 @@ UPGEOF
         su - "$POSTGRES_USER" -c "$NEW_BINDIR/pg_upgrade -U $_install_user -b $OLD_BINDIR -B $NEW_BINDIR -d $POSTGRES_DIR -D $NEW_POSTGRES_DIR"
 
         # Move old data directory for backup, move new into place
-        mv "$POSTGRES_DIR" "${POSTGRES_DIR}_backup_${CURRENT_VERSION}_$(date +%s)"
-        mv "$NEW_POSTGRES_DIR" "$POSTGRES_DIR"
+        BACKUP_DIR="${POSTGRES_DIR}_backup_${CURRENT_VERSION}_$(date +%s)"
+        if mv "$POSTGRES_DIR" "$BACKUP_DIR" 2>/dev/null; then
+            mv "$NEW_POSTGRES_DIR" "$POSTGRES_DIR"
+        else
+            # mv fails when directory is a Docker volume mount point or otherwise busy.
+            # Fallback: swap contents instead of renaming directories.
+            echo "Warning: Cannot rename $POSTGRES_DIR (mount point or busy). Using content-level migration..."
+            mkdir -p "$BACKUP_DIR"
+            # Move old contents to backup dir
+            find "$POSTGRES_DIR" -mindepth 1 -maxdepth 1 -exec mv {} "$BACKUP_DIR/" \;
+            # Move upgraded contents into place
+            find "$NEW_POSTGRES_DIR" -mindepth 1 -maxdepth 1 -exec mv {} "$POSTGRES_DIR/" \;
+            rmdir "$NEW_POSTGRES_DIR" 2>/dev/null || true
+            chown -R "$PUID:$PGID" "$POSTGRES_DIR"
+            chmod 700 "$POSTGRES_DIR"
+        fi
 
         # Apply standard connection configuration to the upgraded data directory.
         configure_pg_network "${POSTGRES_DIR}"
