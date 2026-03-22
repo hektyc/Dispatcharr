@@ -175,6 +175,9 @@ def generate_m3u(request, profile_name=None, user=None):
     # Check if direct stream URLs should be used instead of proxy
     use_direct_urls = request.GET.get('direct', 'false').lower() == 'true'
 
+    # Check if HLS format is requested (use HLS output URLs instead of MPEG-TS proxy)
+    use_hls_format = request.GET.get('format', '').lower() == 'hls'
+
     # Get the source to use for tvg-id value
     # Options: 'channel_number' (default), 'tvg_id', 'gracenote'
     tvg_id_source = request.GET.get('tvg_id_source', 'channel_number').lower()
@@ -269,6 +272,9 @@ def generate_m3u(request, profile_name=None, user=None):
             else:
                 # Fall back to proxy URL if no direct URL available
                 stream_url = build_absolute_uri_with_port(request, f"/proxy/ts/stream/{channel.uuid}")
+        elif use_hls_format:
+            # HLS output format - use HLS output playlist URL
+            stream_url = build_absolute_uri_with_port(request, f"/proxy/hls_output/{channel.uuid}/playlist.m3u8")
         else:
             # Standard behavior - use proxy URL
             stream_url = build_absolute_uri_with_port(request, f"/proxy/ts/stream/{channel.uuid}")

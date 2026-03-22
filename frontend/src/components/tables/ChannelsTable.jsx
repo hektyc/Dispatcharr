@@ -64,6 +64,7 @@ import {
   NumberInput,
   Tooltip,
   Skeleton,
+  SegmentedControl,
 } from '@mantine/core';
 import { getCoreRowModel, flexRender } from '@tanstack/react-table';
 import './table.css';
@@ -92,6 +93,7 @@ import { USER_LEVELS } from '../../constants';
 const m3uUrlBase = `${window.location.protocol}//${window.location.host}/output/m3u`;
 const epgUrlBase = `${window.location.protocol}//${window.location.host}/output/epg`;
 const hdhrUrlBase = `${window.location.protocol}//${window.location.host}/hdhr`;
+const hdhrHlsUrlBase = `${window.location.protocol}//${window.location.host}/hdhr-hls`;
 
 const ChannelEnabledSwitch = React.memo(
   ({ rowId, selectedProfileId, selectedTableIds }) => {
@@ -348,8 +350,12 @@ const ChannelsTable = ({ onReady }) => {
   const [isLoading, setIsLoading] = useState(true);
 
   const [hdhrUrl, setHDHRUrl] = useState(hdhrUrlBase);
+  const [hdhrHlsUrl, setHDHRHlsUrl] = useState(hdhrHlsUrlBase);
   const [epgUrl, setEPGUrl] = useState(epgUrlBase);
   const [m3uUrl, setM3UUrl] = useState(m3uUrlBase);
+
+  const streamFormat = useSettingsStore((s) => s.streamFormat);
+  const setStreamFormat = useSettingsStore((s) => s.setStreamFormat);
 
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -685,7 +691,9 @@ const ChannelsTable = ({ onReady }) => {
       return '';
     }
 
-    const uri = `/proxy/ts/stream/${channel.uuid}`;
+    const uri = streamFormat === 'hls'
+      ? `/proxy/hls_output/${channel.uuid}/playlist.m3u8`
+      : `/proxy/ts/stream/${channel.uuid}`;
     let channelUrl = `${window.location.protocol}//${window.location.host}${uri}`;
     if (env_mode == 'dev') {
       channelUrl = `${window.location.protocol}//${window.location.hostname}:5656${uri}`;
@@ -747,6 +755,7 @@ const ChannelsTable = ({ onReady }) => {
     if (m3uParams.direct) params.append('direct', 'true');
     if (m3uParams.tvg_id_source !== 'channel_number')
       params.append('tvg_id_source', m3uParams.tvg_id_source);
+    if (streamFormat === 'hls') params.append('format', 'hls');
 
     const baseUrl = m3uUrl;
     return params.toString() ? `${baseUrl}?${params.toString()}` : baseUrl;
@@ -781,6 +790,13 @@ const ChannelsTable = ({ onReady }) => {
     await copyToClipboard(hdhrUrl, {
       successTitle: 'HDHR URL Copied!',
       successMessage: 'The HDHR URL has been copied to your clipboard.',
+    });
+  };
+
+  const copyHDHRHlsUrl = async () => {
+    await copyToClipboard(hdhrHlsUrl, {
+      successTitle: 'HDHR-HLS URL Copied!',
+      successMessage: 'The HDHR-HLS URL has been copied to your clipboard.',
     });
   };
 
@@ -863,6 +879,7 @@ const ChannelsTable = ({ onReady }) => {
     const profileString =
       selectedProfileId != '0' ? `/${profiles[selectedProfileId].name}` : '';
     setHDHRUrl(`${hdhrUrlBase}${profileString}`);
+    setHDHRHlsUrl(`${hdhrHlsUrlBase}${profileString}`);
     setEPGUrl(`${epgUrlBase}${profileString}`);
     setM3UUrl(`${m3uUrlBase}${profileString}`);
   }, [selectedProfileId, profiles]);
@@ -1248,24 +1265,55 @@ const ChannelsTable = ({ onReady }) => {
                   </Button>
                 </Popover.Target>
                 <Popover.Dropdown>
-                  <Group
-                    gap="sm"
+                  <Stack
+                    gap="xs"
                     style={{
-                      minWidth: 250,
-                      maxWidth: 'min(400px, 80vw)',
+                      minWidth: 280,
+                      maxWidth: 'min(450px, 85vw)',
                       width: 'max-content',
                     }}
+                    onClick={stopPropagation}
+                    onMouseDown={stopPropagation}
                   >
-                    <TextInput value={hdhrUrl} size="small" readOnly />
-                    <ActionIcon
-                      onClick={copyHDHRUrl}
-                      size="sm"
-                      variant="transparent"
-                      color="gray.5"
-                    >
-                      <Copy size="18" fontSize="small" />
-                    </ActionIcon>
-                  </Group>
+                    <Group gap="sm">
+                      <TextInput
+                        value={hdhrUrl}
+                        size="xs"
+                        readOnly
+                        label="HDHR (MPEG-TS)"
+                        style={{ flex: 1 }}
+                        rightSection={
+                          <ActionIcon
+                            onClick={copyHDHRUrl}
+                            size="sm"
+                            variant="transparent"
+                            color="gray.5"
+                          >
+                            <Copy size="16" />
+                          </ActionIcon>
+                        }
+                      />
+                    </Group>
+                    <Group gap="sm">
+                      <TextInput
+                        value={hdhrHlsUrl}
+                        size="xs"
+                        readOnly
+                        label="HDHR (HLS)"
+                        style={{ flex: 1 }}
+                        rightSection={
+                          <ActionIcon
+                            onClick={copyHDHRHlsUrl}
+                            size="sm"
+                            variant="transparent"
+                            color="gray.5"
+                          >
+                            <Copy size="16" />
+                          </ActionIcon>
+                        }
+                      />
+                    </Group>
+                  </Stack>
                 </Popover.Dropdown>
               </Popover>
               <Popover
@@ -1457,6 +1505,20 @@ const ChannelsTable = ({ onReady }) => {
                   </Stack>
                 </Popover.Dropdown>
               </Popover>
+              <SegmentedControl
+                size="xs"
+                data={[
+                  { value: 'ts', label: 'MPEG-TS' },
+                  { value: 'hls', label: 'HLS' },
+                ]}
+                value={streamFormat}
+                onChange={setStreamFormat}
+                styles={{
+                  root: {
+                    marginLeft: 8,
+                  },
+                }}
+              />
             </Group>
           </Flex>
         </Flex>
