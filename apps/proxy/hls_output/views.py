@@ -43,6 +43,11 @@ def _get_client_ip(request) -> str:
     return request.META.get("REMOTE_ADDR", "unknown")
 
 
+def _get_user_agent(request) -> str:
+    """Get the client's user-agent string."""
+    return request.META.get("HTTP_USER_AGENT", "unknown")
+
+
 @require_GET
 def hls_master_playlist(request, channel_uuid):
     """Serve the HLS master playlist for a channel.
@@ -62,9 +67,15 @@ def hls_master_playlist(request, channel_uuid):
     if not session:
         return HttpResponse("Failed to start HLS session", status=503)
 
-    # Register client
+    # Register client with IP and user-agent for stats tracking
     client_id = _get_client_id(request)
-    hls_client_manager.add_client(channel_uuid, client_id)
+    client_ip = _get_client_ip(request)
+    client_ua = _get_user_agent(request)
+    hls_client_manager.add_client(
+        channel_uuid, client_id,
+        ip_address=client_ip,
+        user_agent=client_ua,
+    )
 
     # Wait for HLS output to be ready
     storage = session.storage
@@ -176,7 +187,7 @@ def hls_segment(request, channel_uuid, segment_name):
     """Serve an HLS segment file.
 
     Reads the segment from the storage backend and returns it
-    with the appropriate content type.
+    with the appropriate content type. Tracks bytes_sent per client.
     """
     session = hls_manager.get_session(channel_uuid)
     if not session:
@@ -186,10 +197,6 @@ def hls_segment(request, channel_uuid, segment_name):
         session = hls_manager.get_or_start_session(channel_uuid)
         if not session:
             return HttpResponse("No active HLS session", status=404)
-
-    # Update client activity
-    client_id = _get_client_id(request)
-    hls_client_manager.update_client_activity(channel_uuid, client_id)
 
     # Determine content type
     if segment_name.endswith(".ts"):
@@ -201,12 +208,18 @@ def hls_segment(request, channel_uuid, segment_name):
     else:
         content_type = "application/octet-stream"
 
+    # Serve segment and track bytes
+    client_id = _get_client_id(request)
+    bytes_served = 0
+
     if hls_config.storage_backend == "redis":
         # Serve from Redis
         data = session.storage.get_segment(channel_uuid, segment_name)
         if data is None:
             return HttpResponse("Segment not found", status=404)
-        return HttpResponse(
+
+        bytes_served = len(data)
+        response = HttpResponse(
             data,
             content_type=content_type,
             headers={
@@ -226,13 +239,28 @@ def hls_segment(request, channel_uuid, segment_name):
         if not segment_path or not os.path.exists(segment_path):
             return HttpResponse("Segment not found", status=404)
 
+        try:
+            bytes_served = os.path.getsize(segment_path)
+        except OSError:
+            bytes_served = 0
+
         response = FileResponse(
             open(segment_path, "rb"),
             content_type=content_type,
         )
         response["Cache-Control"] = "no-cache"
         response["Access-Control-Allow-Origin"] = "*"
-        return response
+
+    # Update client activity with bytes_sent
+    hls_client_manager.update_client_activity(
+        channel_uuid, client_id, bytes_sent=bytes_served
+    )
+
+    # Update session total bytes counter
+    if bytes_served > 0 and session.is_running:
+        session.add_bytes(bytes_served)
+
+    return response
 
 
 @csrf_exempt

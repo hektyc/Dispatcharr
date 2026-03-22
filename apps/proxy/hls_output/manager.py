@@ -61,7 +61,7 @@ def get_channel_or_stream(identifier: str):
 
 
 def get_direct_stream_url(channel):
-    """Get the direct stream URL, user agent, and stream profile for a channel.
+    """Get the direct stream URL, user agent, stream profile, and stream info for a channel.
 
     Follows the channel's stream selection to find the actual URL
     and resolves the channel's stream profile for HLS command building.
@@ -70,19 +70,21 @@ def get_direct_stream_url(channel):
         channel: A Channel model instance.
 
     Returns:
-        Tuple of (url, user_agent_string, stream_profile) or (None, None, None).
+        Tuple of (url, user_agent_string, stream_profile, stream_info_dict)
+        or (None, None, None, None).
+        stream_info_dict contains 'stream_id' and 'm3u_profile_id'.
     """
     try:
         # channel.streams is a ManyToManyField through ChannelStream,
         # .first() returns a Stream instance directly
         stream = channel.streams.first()
         if not stream:
-            return None, None, None
+            return None, None, None, None
 
         # Get the stream URL
         url = stream.url
         if not url:
-            return None, None, None
+            return None, None, None, None
 
         # Get the channel's stream profile (handles fallback to default)
         profile = channel.get_stream_profile()
@@ -92,25 +94,43 @@ def get_direct_stream_url(channel):
         if profile and profile.user_agent:
             user_agent = profile.user_agent.user_agent
 
-        return url, user_agent, profile
+        # Collect stream info for stats integration
+        stream_info = {
+            "stream_id": stream.id,
+            "m3u_profile_id": None,
+        }
+        # Try to get M3U profile ID from the stream's M3U account
+        if hasattr(stream, "m3u_account") and stream.m3u_account:
+            try:
+                from apps.m3u.models import M3UAccountProfile
+                m3u_profile = M3UAccountProfile.objects.filter(
+                    m3u_account=stream.m3u_account
+                ).first()
+                if m3u_profile:
+                    stream_info["m3u_profile_id"] = m3u_profile.id
+            except Exception:
+                pass
+
+        return url, user_agent, profile, stream_info
     except Exception as e:
         logger.error("Failed to get stream URL for channel %s: %s", channel.uuid, e)
-        return None, None, None
+        return None, None, None, None
 
 
 def get_direct_stream_url_for_stream(stream):
-    """Get the direct URL, user agent, and stream profile for a specific stream.
+    """Get the direct URL, user agent, stream profile, and stream info for a specific stream.
 
     Args:
         stream: A Stream model instance.
 
     Returns:
-        Tuple of (url, user_agent_string, stream_profile) or (None, None, None).
+        Tuple of (url, user_agent_string, stream_profile, stream_info_dict)
+        or (None, None, None, None).
     """
     try:
         url = stream.url
         if not url:
-            return None, None, None
+            return None, None, None, None
 
         # Get the default HLS profile for standalone streams
         profile = _get_default_hls_profile()
@@ -119,10 +139,15 @@ def get_direct_stream_url_for_stream(stream):
         if profile and profile.user_agent:
             user_agent = profile.user_agent.user_agent
 
-        return url, user_agent, profile
+        stream_info = {
+            "stream_id": stream.id,
+            "m3u_profile_id": None,
+        }
+
+        return url, user_agent, profile, stream_info
     except Exception as e:
         logger.error("Failed to get stream URL: %s", e)
-        return None, None, None
+        return None, None, None, None
 
 
 def _get_default_hls_profile():
@@ -308,10 +333,11 @@ class HLSOutputManager:
             # Look up channel and get stream URL + profile
             channel, stream = get_channel_or_stream(channel_uuid)
             stream_profile = None
+            stream_info = None
             if channel:
-                url, user_agent, stream_profile = get_direct_stream_url(channel)
+                url, user_agent, stream_profile, stream_info = get_direct_stream_url(channel)
             elif stream:
-                url, user_agent, stream_profile = get_direct_stream_url_for_stream(stream)
+                url, user_agent, stream_profile, stream_info = get_direct_stream_url_for_stream(stream)
             else:
                 logger.error("Channel/stream not found: %s", channel_uuid)
                 self._release_ownership(channel_uuid)
@@ -328,9 +354,22 @@ class HLSOutputManager:
                 if hls_profile:
                     stream_profile = hls_profile
 
+            # Extract stream/profile info for stats integration
+            stream_id = stream_info.get("stream_id") if stream_info else None
+            m3u_profile_id = stream_info.get("m3u_profile_id") if stream_info else None
+            profile_name = stream_profile.name if stream_profile else ""
+
             # Create storage and session
             storage = _create_storage(channel_uuid)
-            session = HLSSession(channel_uuid, storage, stream_profile=stream_profile)
+            session = HLSSession(
+                channel_uuid,
+                storage,
+                stream_profile=stream_profile,
+                stream_id=stream_id,
+                stream_profile_name=profile_name,
+                m3u_profile_id=m3u_profile_id,
+                worker_id=self._worker_id,
+            )
 
             if session.start(url, user_agent):
                 self._sessions[channel_uuid] = session
@@ -343,6 +382,13 @@ class HLSOutputManager:
 
                 # Start client manager if not running
                 hls_client_manager.start()
+
+                # Log system event for channel start
+                self._log_channel_event(
+                    "channel_start", channel_uuid,
+                    channel=channel, stream_id=stream_id,
+                    stream_type="hls",
+                )
 
                 logger.info("HLS session started for %s", channel_uuid)
                 return session
@@ -359,6 +405,10 @@ class HLSOutputManager:
             session.stop()
             hls_client_manager.unregister_shutdown_callback(channel_uuid)
             self._release_ownership(channel_uuid)
+
+            # Log system event for channel stop
+            self._log_channel_event("channel_stop", channel_uuid, stream_type="hls")
+
             logger.info("HLS session stopped for %s", channel_uuid)
 
     def get_session(self, channel_uuid: str) -> Optional[HLSSession]:
@@ -400,6 +450,52 @@ class HLSOutputManager:
     def get_active_channels(self) -> list:
         """Get list of channel UUIDs with active sessions."""
         return list(self._sessions.keys())
+
+    @staticmethod
+    def _log_channel_event(event_type: str, channel_uuid: str, channel=None, **kwargs):
+        """Log a system event for an HLS channel lifecycle event.
+
+        Args:
+            event_type: e.g. 'channel_start', 'channel_stop'
+            channel_uuid: The channel UUID.
+            channel: Optional Channel model instance (avoids extra DB lookup).
+            **kwargs: Extra detail fields passed to log_system_event.
+        """
+        try:
+            from core.utils import log_system_event
+
+            channel_name = None
+            if channel is not None:
+                channel_name = getattr(channel, "name", None)
+            else:
+                # Try to look up channel name from DB
+                try:
+                    from apps.channels.models import Channel
+                    ch = Channel.objects.filter(uuid=channel_uuid).first()
+                    if ch:
+                        channel_name = ch.name
+                except Exception:
+                    pass
+
+            # Look up stream name if stream_id provided
+            stream_id = kwargs.get("stream_id")
+            if stream_id and "stream_name" not in kwargs:
+                try:
+                    from apps.channels.models import Stream
+                    s = Stream.objects.filter(id=stream_id).first()
+                    if s:
+                        kwargs["stream_name"] = s.name
+                except Exception:
+                    pass
+
+            log_system_event(
+                event_type,
+                channel_id=channel_uuid,
+                channel_name=channel_name,
+                **kwargs,
+            )
+        except Exception as e:
+            logger.debug("Failed to log system event %s for %s: %s", event_type, channel_uuid, e)
 
 
 # Singleton instance

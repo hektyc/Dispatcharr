@@ -1,7 +1,9 @@
 """HLS Output Client Manager.
 
 Redis-backed client tracking for HLS output sessions.
-Tracks connected clients, handles TTL-based cleanup, and manages
+Tracks connected clients using TS-compatible Redis keys so that
+HLS channels appear on the Stats page alongside TS channels.
+Handles TTL-based cleanup, heartbeat thread, and manages
 session shutdown after the last client disconnects.
 """
 
@@ -12,16 +14,22 @@ import threading
 import logging
 from typing import Dict, Optional, Set
 
+from apps.proxy.ts_proxy.constants import ChannelMetadataField
+
 logger = logging.getLogger(__name__)
 
-# Redis key patterns
-CLIENT_SET_KEY = "hls_output:channel:{uuid}:clients"
-CLIENT_DATA_KEY = "hls_output:channel:{uuid}:client:{client_id}"
-COOLDOWN_KEY = "hls_output:channel:{uuid}:cooldown"
-ACTIVE_CHANNELS_KEY = "hls_output:active_channels"
+# ----- Redis key patterns -----
+# TS-compatible keys (used by Stats API & WebSocket push)
+TS_CLIENT_SET_KEY = "ts_proxy:channel:{uuid}:clients"
+TS_CLIENT_DATA_KEY = "ts_proxy:channel:{uuid}:clients:{client_id}"
+
+# HLS-specific keys (kept for HLS-specific shutdown logic)
+HLS_COOLDOWN_KEY = "hls_output:channel:{uuid}:cooldown"
+HLS_ACTIVE_CHANNELS_KEY = "hls_output:active_channels"
 
 # Timeouts
-CLIENT_TTL = 30  # Seconds before a client is considered inactive
+CLIENT_TTL = 60  # Seconds before a client record expires in Redis
+HEARTBEAT_INTERVAL = 10  # Seconds between heartbeat refreshes
 CLEANUP_INTERVAL = 10  # Seconds between cleanup runs
 COOLDOWN_DURATION = 5  # Seconds to wait before allowing shutdown after last client
 
@@ -30,7 +38,8 @@ class HLSClientManager:
     """Singleton manager for HLS output client tracking.
 
     Uses Redis to track connected clients across multiple workers.
-    Automatically detects inactive clients and triggers session shutdown.
+    Writes TS-compatible client metadata so the existing Stats API
+    and WebSocket channel_stats push automatically include HLS clients.
     """
 
     _instance = None
@@ -50,8 +59,13 @@ class HLSClientManager:
         self._initialized = True
         self._redis = None
         self._cleanup_thread = None
+        self._heartbeat_thread = None
         self._stop_event = threading.Event()
         self._shutdown_callbacks = {}  # channel_uuid -> callback
+        self._worker_id = str(uuid.uuid4())[:8]
+        # Local tracking: channel_uuid -> set of client_ids
+        self._local_clients: Dict[str, Set[str]] = {}
+        self._local_clients_lock = threading.Lock()
 
     @property
     def redis_client(self):
@@ -75,24 +89,36 @@ class HLSClientManager:
         return self._redis
 
     def start(self):
-        """Start the cleanup thread."""
+        """Start the cleanup and heartbeat threads."""
         if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
             return
         self._stop_event.clear()
+
         self._cleanup_thread = threading.Thread(
             target=self._cleanup_loop,
             name="hls-client-cleanup",
             daemon=True,
         )
         self._cleanup_thread.start()
-        logger.info("HLS client manager cleanup thread started")
+
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="hls-client-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+        logger.info("HLS client manager started (cleanup + heartbeat threads)")
 
     def stop(self):
-        """Stop the cleanup thread."""
+        """Stop the cleanup and heartbeat threads."""
         self._stop_event.set()
         if self._cleanup_thread is not None:
             self._cleanup_thread.join(timeout=5)
             self._cleanup_thread = None
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=5)
+            self._heartbeat_thread = None
 
     def register_shutdown_callback(self, channel_uuid: str, callback):
         """Register a callback to be called when all clients disconnect."""
@@ -102,12 +128,20 @@ class HLSClientManager:
         """Remove shutdown callback for a channel."""
         self._shutdown_callbacks.pop(channel_uuid, None)
 
-    def add_client(self, channel_uuid: str, client_id: str) -> bool:
-        """Register a client for a channel.
+    def add_client(
+        self,
+        channel_uuid: str,
+        client_id: str,
+        ip_address: str = "unknown",
+        user_agent: str = "unknown",
+    ) -> bool:
+        """Register a client for a channel using TS-compatible Redis keys.
 
         Args:
             channel_uuid: The channel identifier.
             client_id: Unique client identifier.
+            ip_address: Client IP address.
+            user_agent: Client user-agent string.
 
         Returns:
             True if client was added successfully.
@@ -117,54 +151,88 @@ class HLSClientManager:
             if rc is None:
                 return False
 
-            now = time.time()
-            # Add to channel's client set
-            client_set_key = CLIENT_SET_KEY.format(uuid=channel_uuid)
+            now = str(time.time())
+
+            # ---- TS-compatible client metadata hash ----
+            client_data_key = TS_CLIENT_DATA_KEY.format(
+                uuid=channel_uuid, client_id=client_id
+            )
+            client_data = {
+                ChannelMetadataField.CONNECTED_AT: now,
+                ChannelMetadataField.LAST_ACTIVE: now,
+                ChannelMetadataField.BYTES_SENT: "0",
+                ChannelMetadataField.IP_ADDRESS: ip_address,
+                ChannelMetadataField.USER_AGENT: user_agent,
+                ChannelMetadataField.WORKER_ID: self._worker_id,
+            }
+            rc.hset(client_data_key, mapping=client_data)
+            rc.expire(client_data_key, CLIENT_TTL)
+
+            # ---- TS-compatible client set ----
+            client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
             rc.sadd(client_set_key, client_id)
             rc.expire(client_set_key, CLIENT_TTL * 2)
 
-            # Store client data with activity timestamp
-            client_data_key = CLIENT_DATA_KEY.format(
-                uuid=channel_uuid, client_id=client_id
-            )
-            rc.setex(
-                client_data_key,
-                CLIENT_TTL,
-                json.dumps({"last_activity": now}).encode("utf-8"),
-            )
-
-            # Track as active channel
-            rc.sadd(ACTIVE_CHANNELS_KEY, channel_uuid)
+            # ---- HLS-specific active channel tracking ----
+            rc.sadd(HLS_ACTIVE_CHANNELS_KEY, channel_uuid)
 
             # Clear any cooldown
-            cooldown_key = COOLDOWN_KEY.format(uuid=channel_uuid)
+            cooldown_key = HLS_COOLDOWN_KEY.format(uuid=channel_uuid)
             rc.delete(cooldown_key)
 
-            self._send_websocket_update(channel_uuid)
+            # Track locally for heartbeat
+            with self._local_clients_lock:
+                if channel_uuid not in self._local_clients:
+                    self._local_clients[channel_uuid] = set()
+                self._local_clients[channel_uuid].add(client_id)
+
+            # Trigger channel_stats WebSocket push
+            self._trigger_stats_update()
+
+            # Log system event for client connect
+            self._log_client_event(
+                "client_connect", channel_uuid,
+                client_id=client_id, ip_address=ip_address,
+                user_agent=user_agent, stream_type="hls",
+            )
+
             return True
         except Exception as e:
             logger.error("Failed to add client %s to channel %s: %s", client_id, channel_uuid, e)
             return False
 
-    def update_client_activity(self, channel_uuid: str, client_id: str):
-        """Update client activity timestamp (called on segment requests)."""
+    def update_client_activity(
+        self,
+        channel_uuid: str,
+        client_id: str,
+        bytes_sent: int = 0,
+    ):
+        """Update client activity timestamp and bytes_sent.
+
+        Called on every playlist/segment request.
+        """
         try:
             rc = self.redis_client
             if rc is None:
                 return
 
-            now = time.time()
-            client_data_key = CLIENT_DATA_KEY.format(
+            now = str(time.time())
+            client_data_key = TS_CLIENT_DATA_KEY.format(
                 uuid=channel_uuid, client_id=client_id
             )
-            rc.setex(
-                client_data_key,
-                CLIENT_TTL,
-                json.dumps({"last_activity": now}).encode("utf-8"),
-            )
+
+            updates = {
+                ChannelMetadataField.LAST_ACTIVE: now,
+            }
+            if bytes_sent > 0:
+                # Increment bytes_sent
+                rc.hincrby(client_data_key, ChannelMetadataField.BYTES_SENT, bytes_sent)
+                # Remove from updates dict since we used hincrby
+            rc.hset(client_data_key, mapping=updates)
+            rc.expire(client_data_key, CLIENT_TTL)
 
             # Refresh the client set TTL
-            client_set_key = CLIENT_SET_KEY.format(uuid=channel_uuid)
+            client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
             rc.expire(client_set_key, CLIENT_TTL * 2)
         except Exception as e:
             logger.debug("Failed to update client activity: %s", e)
@@ -176,15 +244,32 @@ class HLSClientManager:
             if rc is None:
                 return
 
-            client_set_key = CLIENT_SET_KEY.format(uuid=channel_uuid)
+            # Remove from TS-compatible client set
+            client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
             rc.srem(client_set_key, client_id)
 
-            client_data_key = CLIENT_DATA_KEY.format(
+            # Remove TS-compatible client data hash
+            client_data_key = TS_CLIENT_DATA_KEY.format(
                 uuid=channel_uuid, client_id=client_id
             )
             rc.delete(client_data_key)
 
-            self._send_websocket_update(channel_uuid)
+            # Remove from local tracking
+            with self._local_clients_lock:
+                clients = self._local_clients.get(channel_uuid)
+                if clients:
+                    clients.discard(client_id)
+                    if not clients:
+                        del self._local_clients[channel_uuid]
+
+            # Trigger channel_stats WebSocket push
+            self._trigger_stats_update()
+
+            # Log system event for client disconnect
+            self._log_client_event(
+                "client_disconnect", channel_uuid,
+                client_id=client_id, stream_type="hls",
+            )
         except Exception as e:
             logger.error("Failed to remove client %s from channel %s: %s", client_id, channel_uuid, e)
 
@@ -194,18 +279,18 @@ class HLSClientManager:
             rc = self.redis_client
             if rc is None:
                 return 0
-            client_set_key = CLIENT_SET_KEY.format(uuid=channel_uuid)
+            client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
             return rc.scard(client_set_key) or 0
         except Exception:
             return 0
 
     def get_total_client_count(self) -> int:
-        """Get total client count across all channels."""
+        """Get total client count across all HLS channels."""
         try:
             rc = self.redis_client
             if rc is None:
                 return 0
-            channels = rc.smembers(ACTIVE_CHANNELS_KEY)
+            channels = rc.smembers(HLS_ACTIVE_CHANNELS_KEY)
             total = 0
             for ch in channels:
                 ch_uuid = ch.decode("utf-8") if isinstance(ch, bytes) else ch
@@ -224,10 +309,57 @@ class HLSClientManager:
             rc = self.redis_client
             if rc is None:
                 return
-            cooldown_key = COOLDOWN_KEY.format(uuid=channel_uuid)
+            cooldown_key = HLS_COOLDOWN_KEY.format(uuid=channel_uuid)
             rc.delete(cooldown_key)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ #
+    #  Heartbeat thread
+    # ------------------------------------------------------------------ #
+
+    def _heartbeat_loop(self):
+        """Periodically refresh TTLs on client keys for locally-tracked clients."""
+        while not self._stop_event.is_set():
+            try:
+                self._refresh_client_ttls()
+            except Exception as e:
+                logger.error("HLS heartbeat error: %s", e)
+            self._stop_event.wait(HEARTBEAT_INTERVAL)
+
+    def _refresh_client_ttls(self):
+        """Refresh TTL on all locally-tracked client hashes and sets."""
+        rc = self.redis_client
+        if rc is None:
+            return
+
+        with self._local_clients_lock:
+            channels_snapshot = {
+                ch: set(clients) for ch, clients in self._local_clients.items()
+            }
+
+        if not channels_snapshot:
+            return
+
+        pipe = rc.pipeline()
+        for channel_uuid, client_ids in channels_snapshot.items():
+            client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
+            for client_id in client_ids:
+                client_data_key = TS_CLIENT_DATA_KEY.format(
+                    uuid=channel_uuid, client_id=client_id
+                )
+                # Only refresh TTL, don't update last_active
+                pipe.expire(client_data_key, CLIENT_TTL)
+                pipe.sadd(client_set_key, client_id)
+            pipe.expire(client_set_key, CLIENT_TTL * 2)
+        try:
+            pipe.execute()
+        except Exception as e:
+            logger.debug("Heartbeat pipeline error: %s", e)
+
+    # ------------------------------------------------------------------ #
+    #  Cleanup thread
+    # ------------------------------------------------------------------ #
 
     def _cleanup_loop(self):
         """Periodically clean up inactive clients."""
@@ -239,19 +371,19 @@ class HLSClientManager:
             self._stop_event.wait(CLEANUP_INTERVAL)
 
     def _cleanup_inactive_clients(self):
-        """Remove clients that haven't been active within TTL."""
+        """Remove clients whose data keys have expired (ghost clients)."""
         rc = self.redis_client
         if rc is None:
             return
 
         try:
-            channels = rc.smembers(ACTIVE_CHANNELS_KEY)
+            channels = rc.smembers(HLS_ACTIVE_CHANNELS_KEY)
             if not channels:
                 return
 
             for ch in channels:
                 channel_uuid = ch.decode("utf-8") if isinstance(ch, bytes) else ch
-                client_set_key = CLIENT_SET_KEY.format(uuid=channel_uuid)
+                client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
                 clients = rc.smembers(client_set_key)
 
                 if not clients:
@@ -259,25 +391,36 @@ class HLSClientManager:
                     self._handle_empty_channel(channel_uuid)
                     continue
 
-                # Check each client's TTL (Redis auto-expires client data keys)
+                # Check each client's data key existence (TTL-based expiry)
+                stale_ids = []
                 for client_id_raw in clients:
                     client_id = (
                         client_id_raw.decode("utf-8")
                         if isinstance(client_id_raw, bytes)
                         else client_id_raw
                     )
-                    client_data_key = CLIENT_DATA_KEY.format(
+                    client_data_key = TS_CLIENT_DATA_KEY.format(
                         uuid=channel_uuid, client_id=client_id
                     )
                     if not rc.exists(client_data_key):
-                        # Client data expired - remove from set
-                        rc.srem(client_set_key, client_id)
+                        stale_ids.append(client_id_raw)
+
+                # Remove stale entries from set
+                if stale_ids:
+                    rc.srem(client_set_key, *stale_ids)
+                    # Also remove from local tracking
+                    with self._local_clients_lock:
+                        local_set = self._local_clients.get(channel_uuid)
+                        if local_set:
+                            for sid in stale_ids:
+                                s = sid.decode("utf-8") if isinstance(sid, bytes) else sid
+                                local_set.discard(s)
 
                 # Re-check if channel has clients after cleanup
                 remaining = rc.scard(client_set_key) or 0
                 if remaining == 0:
                     self._handle_empty_channel(channel_uuid)
-                    self._send_websocket_update(channel_uuid)
+                    self._trigger_stats_update()
 
         except Exception as e:
             logger.error("Cleanup error: %s", e)
@@ -288,7 +431,7 @@ class HLSClientManager:
         if rc is None:
             return
 
-        cooldown_key = COOLDOWN_KEY.format(uuid=channel_uuid)
+        cooldown_key = HLS_COOLDOWN_KEY.format(uuid=channel_uuid)
 
         if not rc.exists(cooldown_key):
             # Start cooldown
@@ -313,10 +456,104 @@ class HLSClientManager:
                     except Exception as e:
                         logger.error("Shutdown callback error for %s: %s", channel_uuid, e)
                 # Remove from active channels
-                rc.srem(ACTIVE_CHANNELS_KEY, channel_uuid)
+                rc.srem(HLS_ACTIVE_CHANNELS_KEY, channel_uuid)
+
+    # ------------------------------------------------------------------ #
+    #  WebSocket stats push (channel_stats)
+    # ------------------------------------------------------------------ #
+
+    def _trigger_stats_update(self):
+        """Trigger a channel_stats WebSocket update in a background thread.
+
+        Uses the same pattern as the TS proxy ClientManager: scans all
+        ts_proxy:channel:*:clients keys, builds channel info, and pushes
+        a channel_stats message through the 'updates' WebSocket group.
+        """
+        threading.Thread(target=self._do_stats_update, daemon=True).start()
+
+    def _do_stats_update(self):
+        """Perform the stats update (runs in background thread)."""
+        try:
+            from apps.proxy.ts_proxy.channel_status import ChannelStatus
+            import redis
+            from django.conf import settings
+
+            redis_url = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
+            redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+            all_channels = []
+            cursor = 0
+
+            while True:
+                cursor, keys = redis_client.scan(
+                    cursor, match="ts_proxy:channel:*:clients", count=100
+                )
+                for key in keys:
+                    parts = key.split(":")
+                    if len(parts) >= 4:
+                        ch_id = parts[2]
+                        channel_info = ChannelStatus.get_basic_channel_info(ch_id)
+                        if channel_info:
+                            all_channels.append(channel_info)
+
+                if cursor == 0:
+                    break
+
+            from core.utils import send_websocket_update
+
+            send_websocket_update(
+                "updates",
+                "update",
+                {
+                    "success": True,
+                    "type": "channel_stats",
+                    "stats": json.dumps(
+                        {"channels": all_channels, "count": len(all_channels)}
+                    ),
+                },
+            )
+        except Exception as e:
+            logger.debug("Failed to trigger stats update: %s", e)
+
+    # ------------------------------------------------------------------ #
+    #  System event logging
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _log_client_event(event_type: str, channel_uuid: str, **kwargs):
+        """Log a system event for an HLS client lifecycle event.
+
+        Runs in a background thread to avoid blocking the request path.
+        """
+        def _do_log():
+            try:
+                from core.utils import log_system_event
+
+                channel_name = None
+                try:
+                    from apps.channels.models import Channel
+                    ch = Channel.objects.filter(uuid=channel_uuid).first()
+                    if ch:
+                        channel_name = ch.name
+                except Exception:
+                    pass
+
+                log_system_event(
+                    event_type,
+                    channel_id=channel_uuid,
+                    channel_name=channel_name,
+                    **kwargs,
+                )
+            except Exception as e:
+                logger.debug("Failed to log system event %s: %s", event_type, e)
+
+        threading.Thread(target=_do_log, daemon=True).start()
+
+    # ------------------------------------------------------------------ #
+    #  Legacy WebSocket push (hls_client_update) — kept for backward compat
+    # ------------------------------------------------------------------ #
 
     def _send_websocket_update(self, channel_uuid: str):
-        """Send a WebSocket update about client count changes."""
+        """Send a WebSocket update about client count changes (legacy)."""
         try:
             from channels.layers import get_channel_layer
             from asgiref.sync import async_to_sync

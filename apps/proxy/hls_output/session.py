@@ -7,14 +7,16 @@ an input stream to HLS output segments.
 import os
 import re
 import time
-import json
-import signal
 import subprocess
 import threading
 import logging
 from typing import Optional, Dict, Any
 
 from .config import hls_config
+from apps.proxy.ts_proxy.constants import (
+    ChannelMetadataField,
+    ChannelState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +33,33 @@ PROGRESS_RE = re.compile(
 FPS_RE = re.compile(r"fps=\s*(\d+(?:\.\d+)?)")
 BITRATE_RE = re.compile(r"bitrate=\s*(\d+(?:\.\d+)?)kbits/s")
 
+# Additional patterns for richer stream info parsing
+SAMPLE_RATE_RE = re.compile(r"(\d+)\s*Hz")
+AUDIO_CHANNELS_RE = re.compile(r"(mono|stereo|5\.1|7\.1|\d+\s*channels)")
+PIXEL_FORMAT_RE = re.compile(r"(yuv\w+|rgb\w+|nv\d+)")
+
+# Metadata hash TTL in seconds (1 hour, refreshed periodically)
+METADATA_TTL = 3600
+
 
 class HLSSession:
     """Manages an FFmpeg process for a single channel's HLS output.
 
     Handles FFmpeg lifecycle, stderr parsing for stream info,
+    writes unified metadata to ts_proxy-compatible Redis hash,
     and integrates with the storage backend.
     """
 
-    def __init__(self, channel_uuid: str, storage, stream_profile=None):
+    def __init__(
+        self,
+        channel_uuid: str,
+        storage,
+        stream_profile=None,
+        stream_id=None,
+        stream_profile_name: str = None,
+        m3u_profile_id=None,
+        worker_id: str = None,
+    ):
         """Initialize session.
 
         Args:
@@ -48,10 +68,18 @@ class HLSSession:
             stream_profile: Optional StreamProfile instance for command building.
                 If the profile contains {hlsOutputPath}, it will be used to
                 build the FFmpeg command. Otherwise, falls back to the internal builder.
+            stream_id: Database ID of the active stream.
+            stream_profile_name: Display name of the stream profile.
+            m3u_profile_id: Database ID of the M3U account profile.
+            worker_id: Identifier for the current worker process.
         """
         self.channel_uuid = channel_uuid
         self.storage = storage
         self._stream_profile = stream_profile
+        self._stream_id = stream_id
+        self._stream_profile_name = stream_profile_name or ""
+        self._m3u_profile_id = m3u_profile_id
+        self._worker_id = worker_id or ""
         self._process = None
         self._monitor_thread = None
         self._stderr_thread = None
@@ -62,6 +90,9 @@ class HLSSession:
         self._started_at = None
         self._stream_info = {}
         self._redis = None
+        self._total_bytes = 0
+        self._total_bytes_lock = threading.Lock()
+        self._db_stats_updated = False
 
     @property
     def output_path(self) -> str:
@@ -101,6 +132,11 @@ class HLSSession:
                 pass
         return self._redis
 
+    @property
+    def _metadata_key(self) -> str:
+        """Redis key for the unified TS-compatible channel metadata hash."""
+        return f"ts_proxy:channel:{self.channel_uuid}:metadata"
+
     def start(self, stream_url: str, user_agent: str = None) -> bool:
         """Start the FFmpeg process for HLS output.
 
@@ -118,6 +154,8 @@ class HLSSession:
         self._stream_url = stream_url
         self._user_agent = user_agent or "VLC/3.0.20 LibVLC/3.0.20"
         self._stop_event.clear()
+        self._total_bytes = 0
+        self._db_stats_updated = False
 
         # Ensure output directory
         output_path = self.output_path
@@ -171,14 +209,13 @@ class HLSSession:
                 )
                 self._watcher.start()
 
-            # Update Redis metadata
-            self._update_metadata("status", "running")
-            self._update_metadata("stream_url", stream_url)
-            self._update_metadata("started_at", str(self._started_at))
+            # Write initial unified metadata to ts_proxy-compatible hash
+            self._write_initial_metadata()
 
             return True
         except Exception as e:
             logger.error("Failed to start FFmpeg for channel %s: %s", self.channel_uuid, e)
+            self._set_channel_state(ChannelState.ERROR, error_message=str(e))
             return False
 
     def stop(self):
@@ -220,8 +257,12 @@ class HLSSession:
         # Clean up storage
         self.storage.cleanup_channel(self.channel_uuid)
 
-        # Update Redis metadata
-        self._update_metadata("status", "stopped")
+        # Update DB stats one last time
+        self._update_stream_stats_in_db()
+
+        # Set stopped state and clean up metadata
+        self._set_channel_state(ChannelState.STOPPED)
+        self._cleanup_unified_metadata()
 
         logger.info("HLS output stopped for channel %s", self.channel_uuid)
 
@@ -233,6 +274,194 @@ class HLSSession:
             stream_url or self._stream_url,
             user_agent or self._user_agent,
         )
+
+    def add_bytes(self, byte_count: int):
+        """Add to the total bytes counter (called by views on segment serve)."""
+        with self._total_bytes_lock:
+            self._total_bytes += byte_count
+        # Update metadata periodically (every call is fine since Redis is fast)
+        self._update_ts_metadata({
+            ChannelMetadataField.TOTAL_BYTES: str(self._total_bytes),
+        })
+
+    # ------------------------------------------------------------------ #
+    #  Unified TS-compatible Redis metadata (ts_proxy:channel:{UUID}:metadata)
+    # ------------------------------------------------------------------ #
+
+    def _write_initial_metadata(self):
+        """Write initial channel metadata to the unified TS-compatible hash."""
+        now = str(time.time())
+        metadata = {
+            ChannelMetadataField.STATE: ChannelState.ACTIVE,
+            ChannelMetadataField.URL: self._stream_url or "",
+            ChannelMetadataField.USER_AGENT: self._user_agent or "",
+            ChannelMetadataField.INIT_TIME: now,
+            ChannelMetadataField.STATE_CHANGED_AT: now,
+            ChannelMetadataField.STREAM_TYPE: "hls",
+            ChannelMetadataField.OWNER: self._worker_id or "hls",
+            ChannelMetadataField.TOTAL_BYTES: "0",
+        }
+
+        if self._stream_profile_name:
+            metadata[ChannelMetadataField.STREAM_PROFILE] = self._stream_profile_name
+
+        if self._stream_id is not None:
+            metadata[ChannelMetadataField.STREAM_ID] = str(self._stream_id)
+
+        if self._m3u_profile_id is not None:
+            metadata[ChannelMetadataField.M3U_PROFILE] = str(self._m3u_profile_id)
+
+        try:
+            rc = self.redis_client
+            if rc is None:
+                return
+            rc.hset(self._metadata_key, mapping=metadata)
+            rc.expire(self._metadata_key, METADATA_TTL)
+        except Exception as e:
+            logger.debug("Failed to write initial metadata for %s: %s", self.channel_uuid, e)
+
+    def _set_channel_state(self, state: str, error_message: str = None):
+        """Update the channel state in the unified metadata hash."""
+        updates = {
+            ChannelMetadataField.STATE: state,
+            ChannelMetadataField.STATE_CHANGED_AT: str(time.time()),
+        }
+        if error_message:
+            updates[ChannelMetadataField.ERROR_MESSAGE] = error_message
+            updates[ChannelMetadataField.ERROR_TIME] = str(time.time())
+
+        self._update_ts_metadata(updates)
+
+    def _update_ts_metadata(self, field_map: dict):
+        """Write one or more fields to the unified metadata hash.
+
+        Args:
+            field_map: Dict mapping ChannelMetadataField names to string values.
+        """
+        try:
+            rc = self.redis_client
+            if rc is None:
+                return
+            rc.hset(self._metadata_key, mapping=field_map)
+            rc.expire(self._metadata_key, METADATA_TTL)
+        except Exception:
+            pass
+
+    def _cleanup_unified_metadata(self):
+        """Remove the unified metadata hash after stop (with a short grace TTL)."""
+        try:
+            rc = self.redis_client
+            if rc is None:
+                return
+            # Keep for 30s after stop so Stats page shows final state
+            rc.expire(self._metadata_key, 30)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ #
+    #  Legacy per-key metadata (kept for backward compat with HLS status)
+    # ------------------------------------------------------------------ #
+
+    def _update_metadata(self, field: str, value: str):
+        """Store metadata in Redis for dashboard display (legacy individual keys)."""
+        try:
+            rc = self.redis_client
+            if rc is None:
+                return
+            key = f"hls_output:{self.channel_uuid}:meta:{field}"
+            rc.setex(key, 300, value)  # 5 minute TTL
+        except Exception:
+            pass
+
+    def get_stat(self, field: str) -> Optional[str]:
+        """Get a metadata value from Redis (checks unified hash first, then legacy)."""
+        try:
+            rc = self.redis_client
+            if rc is None:
+                return None
+
+            # Try unified metadata hash first
+            # Map legacy field names to ChannelMetadataField names
+            field_mapping = {
+                "video_codec": ChannelMetadataField.VIDEO_CODEC,
+                "audio_codec": ChannelMetadataField.AUDIO_CODEC,
+                "resolution": ChannelMetadataField.RESOLUTION,
+                "fps": ChannelMetadataField.SOURCE_FPS,
+                "speed": ChannelMetadataField.FFMPEG_SPEED,
+                "current_fps": ChannelMetadataField.FFMPEG_FPS,
+                "current_bitrate": ChannelMetadataField.FFMPEG_OUTPUT_BITRATE,
+                "status": ChannelMetadataField.STATE,
+            }
+            unified_field = field_mapping.get(field, field)
+            data = rc.hget(self._metadata_key, unified_field)
+            if data:
+                return data.decode("utf-8") if isinstance(data, bytes) else data
+
+            # Fallback to legacy per-key metadata
+            key = f"hls_output:{self.channel_uuid}:meta:{field}"
+            data = rc.get(key)
+            if data:
+                return data.decode("utf-8") if isinstance(data, bytes) else data
+            return None
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------ #
+    #  Stream stats in DB (Step 7)
+    # ------------------------------------------------------------------ #
+
+    def _update_stream_stats_in_db(self):
+        """Write FFmpeg-parsed stream stats to the Stream model in the database."""
+        if self._stream_id is None:
+            return
+        if not self._stream_info:
+            return
+
+        try:
+            from django.db import connection
+            from apps.channels.models import Stream
+            from django.utils import timezone
+
+            stream = Stream.objects.get(id=self._stream_id)
+            current_stats = stream.stream_stats or {}
+
+            # Map collected stream info to DB stats
+            stat_mapping = {
+                "video_codec": "video_codec",
+                "audio_codec": "audio_codec",
+                "resolution": "resolution",
+                "fps": "source_fps",
+                "bitrate": "source_bitrate",
+                "sample_rate": "sample_rate",
+                "audio_channels": "audio_channels",
+                "pixel_format": "pixel_format",
+            }
+            for src_key, dest_key in stat_mapping.items():
+                val = self._stream_info.get(src_key)
+                if val is not None:
+                    current_stats[dest_key] = val
+
+            stream.stream_stats = current_stats
+            stream.stream_stats_updated_at = timezone.now()
+            stream.save(update_fields=["stream_stats", "stream_stats_updated_at"])
+            self._db_stats_updated = True
+
+            logger.debug(
+                "Updated stream stats in DB for stream %d (channel %s)",
+                self._stream_id, self.channel_uuid,
+            )
+        except Exception as e:
+            logger.debug("Failed to update stream stats in DB: %s", e)
+        finally:
+            try:
+                from django.db import connection
+                connection.close()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ #
+    #  FFmpeg command building
+    # ------------------------------------------------------------------ #
 
     def _build_ffmpeg_command(self, stream_url: str, user_agent: str, output_path: str) -> list:
         """Build the FFmpeg command for HLS output.
@@ -357,6 +586,10 @@ class HLSSession:
         lower = url.lower().split("?")[0]
         return lower.endswith(".m3u8") or lower.endswith(".m3u")
 
+    # ------------------------------------------------------------------ #
+    #  FFmpeg process monitoring & stderr parsing
+    # ------------------------------------------------------------------ #
+
     def _monitor_process(self):
         """Monitor the FFmpeg process and handle crashes."""
         while not self._stop_event.is_set():
@@ -370,6 +603,8 @@ class HLSSession:
                         "FFmpeg exited with code %d for channel %s",
                         returncode, self.channel_uuid,
                     )
+                    self._set_channel_state(ChannelState.ERROR, error_message=f"FFmpeg exited with code {returncode}")
+                    # Also write legacy key for backward compat
                     self._update_metadata("status", "crashed")
                     # Attempt automatic restart
                     self._try_automatic_restart()
@@ -401,6 +636,7 @@ class HLSSession:
             "Failed to restart channel %s after %d attempts",
             self.channel_uuid, max_retries,
         )
+        self._set_channel_state(ChannelState.ERROR, error_message="Failed restart after multiple attempts")
         self._update_metadata("status", "failed")
 
     def _read_ffmpeg_stderr(self):
@@ -431,69 +667,118 @@ class HLSSession:
                 logger.debug("Stderr reader error for %s: %s", self.channel_uuid, e)
 
     def _parse_ffmpeg_line(self, line: str):
-        """Parse a single line of FFmpeg stderr output."""
+        """Parse a single line of FFmpeg stderr output.
+
+        Writes parsed data to both the unified TS-compatible metadata hash
+        and legacy per-key metadata for backward compatibility.
+        """
         # Stream info detection
         match = STREAM_INFO_RE.search(line)
         if match:
             stream_type = match.group(1)
             codec = match.group(2)
+            unified_updates = {}
+
             if stream_type == "Video":
                 self._stream_info["video_codec"] = codec
+                unified_updates[ChannelMetadataField.VIDEO_CODEC] = codec
+
                 if match.group(3) and match.group(4):
                     width = match.group(3)
                     height = match.group(4)
-                    self._stream_info["resolution"] = f"{width}x{height}"
-                    self._update_metadata("resolution", f"{width}x{height}")
+                    resolution = f"{width}x{height}"
+                    self._stream_info["resolution"] = resolution
+                    unified_updates[ChannelMetadataField.RESOLUTION] = resolution
+                    unified_updates[ChannelMetadataField.WIDTH] = width
+                    unified_updates[ChannelMetadataField.HEIGHT] = height
+                    self._update_metadata("resolution", resolution)
+
                 if match.group(5):
-                    self._stream_info["fps"] = match.group(5)
-                    self._update_metadata("fps", match.group(5))
+                    fps = match.group(5)
+                    self._stream_info["fps"] = fps
+                    unified_updates[ChannelMetadataField.SOURCE_FPS] = fps
+                    self._update_metadata("fps", fps)
+
                 if match.group(6):
-                    self._stream_info["bitrate"] = f"{match.group(6)}kb/s"
+                    bitrate_kbps = match.group(6)
+                    self._stream_info["bitrate"] = f"{bitrate_kbps}kb/s"
+                    unified_updates[ChannelMetadataField.SOURCE_BITRATE] = bitrate_kbps
+                    unified_updates[ChannelMetadataField.VIDEO_BITRATE] = bitrate_kbps
+
+                # Try to extract pixel format from the line
+                pf_match = PIXEL_FORMAT_RE.search(line)
+                if pf_match:
+                    pf = pf_match.group(1)
+                    self._stream_info["pixel_format"] = pf
+                    unified_updates[ChannelMetadataField.PIXEL_FORMAT] = pf
+
                 self._update_metadata("video_codec", codec)
+
             elif stream_type == "Audio":
                 self._stream_info["audio_codec"] = codec
+                unified_updates[ChannelMetadataField.AUDIO_CODEC] = codec
                 self._update_metadata("audio_codec", codec)
+
+                # Extract sample rate
+                sr_match = SAMPLE_RATE_RE.search(line)
+                if sr_match:
+                    sample_rate = sr_match.group(1)
+                    self._stream_info["sample_rate"] = sample_rate
+                    unified_updates[ChannelMetadataField.SAMPLE_RATE] = sample_rate
+
+                # Extract audio channels
+                ac_match = AUDIO_CHANNELS_RE.search(line)
+                if ac_match:
+                    channels = ac_match.group(1)
+                    self._stream_info["audio_channels"] = channels
+                    unified_updates[ChannelMetadataField.AUDIO_CHANNELS] = channels
+
+                # Extract audio bitrate
+                if match.group(6):
+                    audio_br = match.group(6)
+                    self._stream_info["audio_bitrate"] = audio_br
+                    unified_updates[ChannelMetadataField.AUDIO_BITRATE] = audio_br
+
+            if unified_updates:
+                unified_updates[ChannelMetadataField.STREAM_INFO_UPDATED] = str(time.time())
+                self._update_ts_metadata(unified_updates)
+
+                # Update DB stats after we've collected stream info
+                if not self._db_stats_updated:
+                    threading.Thread(
+                        target=self._update_stream_stats_in_db,
+                        name=f"hls-db-stats-{self.channel_uuid[:8]}",
+                        daemon=True,
+                    ).start()
             return
 
         # Progress line
+        unified_updates = {}
+
         progress = PROGRESS_RE.search(line)
         if progress:
             speed = progress.group(1)
+            unified_updates[ChannelMetadataField.FFMPEG_SPEED] = speed
             self._update_metadata("speed", f"{speed}x")
 
         fps_match = FPS_RE.search(line)
         if fps_match:
-            self._update_metadata("current_fps", fps_match.group(1))
+            fps_val = fps_match.group(1)
+            unified_updates[ChannelMetadataField.FFMPEG_FPS] = fps_val
+            unified_updates[ChannelMetadataField.ACTUAL_FPS] = fps_val
+            self._update_metadata("current_fps", fps_val)
 
         bitrate_match = BITRATE_RE.search(line)
         if bitrate_match:
-            self._update_metadata("current_bitrate", f"{bitrate_match.group(1)}kb/s")
+            br_val = bitrate_match.group(1)
+            unified_updates[ChannelMetadataField.FFMPEG_OUTPUT_BITRATE] = br_val
+            unified_updates[ChannelMetadataField.FFMPEG_BITRATE] = br_val
+            self._update_metadata("current_bitrate", f"{br_val}kb/s")
+
+        if unified_updates:
+            unified_updates[ChannelMetadataField.FFMPEG_STATS_UPDATED] = str(time.time())
+            self._update_ts_metadata(unified_updates)
 
         # Error detection
         if "error" in line.lower() and "error hiding" not in line.lower():
             logger.warning("FFmpeg error for %s: %s", self.channel_uuid, line)
-
-    def _update_metadata(self, field: str, value: str):
-        """Store metadata in Redis for dashboard display."""
-        try:
-            rc = self.redis_client
-            if rc is None:
-                return
-            key = f"hls_output:{self.channel_uuid}:meta:{field}"
-            rc.setex(key, 300, value)  # 5 minute TTL
-        except Exception:
-            pass
-
-    def get_stat(self, field: str) -> Optional[str]:
-        """Get a metadata value from Redis."""
-        try:
-            rc = self.redis_client
-            if rc is None:
-                return None
-            key = f"hls_output:{self.channel_uuid}:meta:{field}"
-            data = rc.get(key)
-            if data:
-                return data.decode("utf-8") if isinstance(data, bytes) else data
-            return None
-        except Exception:
-            return None
