@@ -28,13 +28,20 @@ WORKDIR /app
 
 # Copy application code
 COPY . /app
+
+# Sync Python dependencies from pyproject.toml
+# The base image pre-installs packages, but if the fork's pyproject.toml
+# has new dependencies (e.g. drf-spectacular), this ensures they're installed.
+RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/bin/uv \
+    uv sync --python "$VIRTUAL_ENV/bin/python" --no-cache --no-install-project --no-dev
+
 # Copy nginx configuration
 COPY ./docker/nginx.conf /etc/nginx/sites-enabled/default
 # Fix line endings and make entrypoint scripts executable
 RUN for f in /app/docker/entrypoint*.sh; do \
-        if [ -f "$f" ]; then \
-            sed -i 's/\r$//' "$f" && chmod +x "$f"; \
-        fi; \
+    if [ -f "$f" ]; then \
+    sed -i 's/\r$//' "$f" && chmod +x "$f"; \
+    fi; \
     done
 # Clean out existing frontend folder
 RUN rm -rf /app/frontend
