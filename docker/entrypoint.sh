@@ -143,6 +143,13 @@ fi
 EOF
 fi
 
+# Create HLS output directory if HLS_PATH is configured
+if [ -n "${HLS_PATH}" ]; then
+    echo "Creating HLS output directory: ${HLS_PATH}"
+    mkdir -p "${HLS_PATH}"
+    chmod 755 "${HLS_PATH}"
+fi
+
 # Run init scripts
 echo "Starting user setup..."
 . /app/docker/init/01-user-setup.sh

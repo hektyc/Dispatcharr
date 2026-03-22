@@ -15,3 +15,13 @@ class ProxyConfig(AppConfig):
             # Initialize proxy servers (TS uses singleton to prevent duplicate instances)
             self.hls_proxy = HLSProxyServer()
             self.ts_proxy = TSProxyServer.get_instance()
+
+            # Initialize HLS output (creates HLS_PATH directory if configured)
+            try:
+                from .hls_output.config import hls_config
+                hls_config.initialize()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "HLS output initialization failed: %s", e
+                )
