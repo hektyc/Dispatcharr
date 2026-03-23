@@ -2,12 +2,14 @@
 
 Singleton manager that coordinates all HLS output sessions.
 Handles session creation/destruction, multi-worker ownership via Redis,
-stream switching, and lifecycle management.
+stream switching, lifecycle management, and periodic cleanup/heartbeat
+thread matching the TS proxy's cleanup_task pattern.
 """
 
 import os
 import time
 import uuid
+import shutil
 import threading
 import logging
 from typing import Optional, Dict
@@ -27,9 +29,12 @@ def _get_redis_connection_params():
     db = int(os.environ.get("REDIS_DB", getattr(settings, "REDIS_DB", 0)))
     return host, port, db
 
-# Redis key patterns for ownership
+# Redis key patterns for ownership & heartbeat
 OWNER_KEY_PREFIX = "hls_output:owner:{uuid}"
+WORKER_HEARTBEAT_KEY_PREFIX = "hls_output:worker:{worker_id}:heartbeat"
 OWNER_TTL = 30  # Seconds before ownership expires
+HEARTBEAT_TTL = 30  # Worker heartbeat TTL
+CLEANUP_INTERVAL = 10  # Seconds between cleanup cycles
 
 
 def get_channel_or_stream(identifier: str):
@@ -198,6 +203,7 @@ class HLSOutputManager:
     - Multi-worker ownership coordination via Redis
     - Stream switching
     - Automatic cleanup on shutdown
+    - Periodic cleanup/heartbeat thread (ownership refresh, orphan detection)
     """
 
     _instance = None
@@ -219,6 +225,10 @@ class HLSOutputManager:
         self._sessions_lock = threading.Lock()
         self._redis = None
         self._worker_id = str(uuid.uuid4())[:8]
+        self._cleanup_thread = None
+        self._cleanup_stop_event = threading.Event()
+        # Track which channels had stream connection allocated
+        self._allocated_streams: Dict[str, dict] = {}  # channel_uuid -> {stream_id, ...}
 
     @property
     def redis_client(self):
@@ -234,6 +244,9 @@ class HLSOutputManager:
 
     def _get_owner_key(self, channel_uuid: str) -> str:
         return OWNER_KEY_PREFIX.format(uuid=channel_uuid)
+
+    def _get_worker_heartbeat_key(self) -> str:
+        return WORKER_HEARTBEAT_KEY_PREFIX.format(worker_id=self._worker_id)
 
     def _try_acquire_ownership(self, channel_uuid: str) -> bool:
         """Try to acquire ownership of a channel session via Redis SETNX."""
@@ -264,19 +277,43 @@ class HLSOutputManager:
         except Exception as e:
             logger.debug("Failed to release ownership for %s: %s", channel_uuid, e)
 
-    def _refresh_ownership(self, channel_uuid: str):
-        """Refresh the TTL on our ownership lock."""
+    def _refresh_ownership(self, channel_uuid: str) -> bool:
+        """Refresh the TTL on our ownership lock.
+
+        Returns True if we still own the channel, False if ownership
+        was lost (e.g. another worker acquired it).
+        """
         try:
             rc = self.redis_client
             if rc is None:
-                return
+                return True
 
             key = self._get_owner_key(channel_uuid)
             current_owner = rc.get(key)
-            if current_owner and current_owner.decode("utf-8") == self._worker_id:
+            if current_owner is None:
+                # Key expired — try to re-acquire
+                acquired = rc.set(key, self._worker_id, nx=True, ex=OWNER_TTL)
+                if acquired:
+                    logger.warning(
+                        "Re-acquired expired ownership for HLS channel %s",
+                        channel_uuid,
+                    )
+                    return True
+                else:
+                    logger.warning(
+                        "Lost ownership of HLS channel %s — another worker took it",
+                        channel_uuid,
+                    )
+                    return False
+            elif current_owner.decode("utf-8") == self._worker_id:
                 rc.expire(key, OWNER_TTL)
-        except Exception:
-            pass
+                return True
+            else:
+                # Another worker owns it now
+                return False
+        except Exception as e:
+            logger.debug("Failed to refresh ownership for %s: %s", channel_uuid, e)
+            return True  # Assume still owner on error
 
     def _is_session_running_elsewhere(self, channel_uuid: str) -> bool:
         """Check if another worker is running a session for this channel."""
@@ -290,9 +327,167 @@ class HLSOutputManager:
             if owner is None:
                 return False
             owner_id = owner.decode("utf-8") if isinstance(owner, bytes) else owner
-            return owner_id != self._worker_id
+            if owner_id == self._worker_id:
+                return False
+
+            # Verify the owner worker is still alive via heartbeat
+            heartbeat_key = WORKER_HEARTBEAT_KEY_PREFIX.format(worker_id=owner_id)
+            if rc.exists(heartbeat_key):
+                return True
+
+            # Owner's heartbeat is missing — the owner may be dead.
+            # Don't report as running elsewhere; allow re-acquisition.
+            logger.info(
+                "HLS channel %s owner %s has no heartbeat — treating as unowned",
+                channel_uuid, owner_id,
+            )
+            return False
         except Exception:
             return False
+
+    # ------------------------------------------------------------------ #
+    #  Cleanup / Heartbeat Thread (Task 1.1, 3.2, 3.3)
+    # ------------------------------------------------------------------ #
+
+    def _start_cleanup_thread(self):
+        """Start the periodic cleanup/heartbeat thread.
+
+        Mirrors the TS proxy's _start_cleanup_thread pattern:
+        - Refreshes worker heartbeat
+        - Refreshes ownership TTL for owned sessions
+        - Refreshes metadata TTL for owned sessions
+        - Detects ownership loss and stops FFmpeg
+        - Scans for orphaned HLS output directories
+        """
+        if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
+            return
+
+        self._cleanup_stop_event.clear()
+
+        def cleanup_task():
+            while not self._cleanup_stop_event.is_set():
+                try:
+                    self._cleanup_cycle()
+                except Exception as e:
+                    logger.error("HLS cleanup cycle error: %s", e)
+                self._cleanup_stop_event.wait(CLEANUP_INTERVAL)
+
+        self._cleanup_thread = threading.Thread(
+            target=cleanup_task,
+            name=f"hls-cleanup-{self._worker_id}",
+            daemon=True,
+        )
+        self._cleanup_thread.start()
+        logger.info("HLS cleanup/heartbeat thread started (worker %s)", self._worker_id)
+
+    def _stop_cleanup_thread(self):
+        """Stop the cleanup thread."""
+        self._cleanup_stop_event.set()
+        if self._cleanup_thread is not None:
+            self._cleanup_thread.join(timeout=5)
+            self._cleanup_thread = None
+
+    def _cleanup_cycle(self):
+        """Single cleanup cycle — called every CLEANUP_INTERVAL seconds."""
+        rc = self.redis_client
+        if rc is None:
+            return
+
+        # 1. Send worker heartbeat
+        try:
+            heartbeat_key = self._get_worker_heartbeat_key()
+            rc.setex(heartbeat_key, HEARTBEAT_TTL, str(time.time()))
+        except Exception as e:
+            logger.debug("Failed to set worker heartbeat: %s", e)
+
+        # 2. Refresh ownership and metadata for locally-owned sessions
+        with self._sessions_lock:
+            sessions_snapshot = dict(self._sessions)
+
+        ownership_lost = []
+        for channel_uuid, session in sessions_snapshot.items():
+            # Skip proxy sessions — they don't own anything
+            if session.is_proxy:
+                continue
+
+            if session.is_running:
+                still_owner = self._refresh_ownership(channel_uuid)
+                if still_owner:
+                    # Refresh metadata TTL
+                    session.refresh_metadata_ttl()
+                else:
+                    # Task 3.3: Ownership lost — stop local FFmpeg
+                    logger.warning(
+                        "Ownership lost for HLS channel %s — stopping local session",
+                        channel_uuid,
+                    )
+                    ownership_lost.append(channel_uuid)
+            else:
+                # Session is not running (maybe crashed) — log and consider removal
+                logger.debug(
+                    "HLS session for %s is not running in cleanup cycle",
+                    channel_uuid,
+                )
+
+        # Stop sessions that lost ownership (outside the lock)
+        for channel_uuid in ownership_lost:
+            try:
+                self._stop_session_internal(channel_uuid, release_ownership=False)
+            except Exception as e:
+                logger.error(
+                    "Error stopping ownership-lost session %s: %s",
+                    channel_uuid, e,
+                )
+
+        # 3. Task 3.2: Scan for orphaned HLS output directories
+        self._cleanup_orphaned_directories()
+
+    def _cleanup_orphaned_directories(self):
+        """Scan HLS_PATH for channel UUID directories with no active session or owner."""
+        hls_path = hls_config.output_path
+        if not hls_path or not os.path.isdir(hls_path):
+            return
+
+        try:
+            for entry in os.listdir(hls_path):
+                dir_path = os.path.join(hls_path, entry)
+                if not os.path.isdir(dir_path):
+                    continue
+
+                channel_uuid = entry
+                # Skip if we have a local session for it
+                if channel_uuid in self._sessions:
+                    continue
+
+                # Check if there is a valid ownership key
+                try:
+                    rc = self.redis_client
+                    if rc is not None:
+                        owner_key = self._get_owner_key(channel_uuid)
+                        owner = rc.get(owner_key)
+                        if owner is not None:
+                            # Check if owner has heartbeat
+                            owner_id = owner.decode("utf-8")
+                            hb_key = WORKER_HEARTBEAT_KEY_PREFIX.format(worker_id=owner_id)
+                            if rc.exists(hb_key):
+                                continue  # Active owner, skip
+                except Exception:
+                    pass
+
+                # No active session, no live owner — remove orphaned directory
+                try:
+                    shutil.rmtree(dir_path, ignore_errors=True)
+                    logger.info(
+                        "Cleaned up orphaned HLS directory: %s", dir_path,
+                    )
+                except Exception as e:
+                    logger.debug("Failed to clean orphaned directory %s: %s", dir_path, e)
+        except Exception as e:
+            logger.debug("Error scanning for orphaned HLS directories: %s", e)
+
+    # ------------------------------------------------------------------ #
+    #  Session management
+    # ------------------------------------------------------------------ #
 
     def get_or_start_session(self, channel_uuid: str) -> Optional[HLSSession]:
         """Get an existing session or start a new one.
@@ -310,7 +505,7 @@ class HLSOutputManager:
         with self._sessions_lock:
             # Check for existing session
             session = self._sessions.get(channel_uuid)
-            if session and session.is_running:
+            if session and (session.is_running or session.is_proxy):
                 return session
 
             # Check if running on another worker
@@ -319,10 +514,11 @@ class HLSOutputManager:
                     "Session for %s running on another worker, creating proxy session",
                     channel_uuid,
                 )
-                # Create a storage-only session for serving content
+                # Task 4.1: Create a clearly-marked proxy session
                 storage = _create_storage(channel_uuid)
-                session = HLSSession(channel_uuid, storage)
+                session = HLSSession(channel_uuid, storage, is_proxy=True)
                 self._sessions[channel_uuid] = session
+                # Do NOT register shutdown callbacks for proxy sessions
                 return session
 
             # Try to acquire ownership
@@ -334,8 +530,49 @@ class HLSOutputManager:
             channel, stream = get_channel_or_stream(channel_uuid)
             stream_profile = None
             stream_info = None
+            allocated_stream = None
             if channel:
-                url, user_agent, stream_profile, stream_info = get_direct_stream_url(channel)
+                # Task 1.3: Use channel.get_stream() for connection allocation
+                try:
+                    allocated_stream, alloc_profile, alloc_error = channel.get_stream()
+                    if alloc_error or not allocated_stream:
+                        logger.error(
+                            "Stream allocation failed for channel %s: %s",
+                            channel_uuid, alloc_error,
+                        )
+                        self._release_ownership(channel_uuid)
+                        return None
+                    url = allocated_stream.url
+                    if not url:
+                        logger.error("Allocated stream has no URL for %s", channel_uuid)
+                        self._release_ownership(channel_uuid)
+                        return None
+                    # Get profile and user_agent from channel
+                    stream_profile = channel.get_stream_profile()
+                    user_agent = "VLC/3.0.20 LibVLC/3.0.20"
+                    if stream_profile and stream_profile.user_agent:
+                        user_agent = stream_profile.user_agent.user_agent
+                    stream_info = {
+                        "stream_id": allocated_stream.id,
+                        "m3u_profile_id": None,
+                    }
+                    if hasattr(allocated_stream, "m3u_account") and allocated_stream.m3u_account:
+                        try:
+                            from apps.m3u.models import M3UAccountProfile
+                            m3u_profile = M3UAccountProfile.objects.filter(
+                                m3u_account=allocated_stream.m3u_account
+                            ).first()
+                            if m3u_profile:
+                                stream_info["m3u_profile_id"] = m3u_profile.id
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.error(
+                        "Error allocating stream for channel %s: %s",
+                        channel_uuid, e,
+                    )
+                    # Fallback to get_direct_stream_url if get_stream fails
+                    url, user_agent, stream_profile, stream_info = get_direct_stream_url(channel)
             elif stream:
                 url, user_agent, stream_profile, stream_info = get_direct_stream_url_for_stream(stream)
             else:
@@ -374,6 +611,13 @@ class HLSOutputManager:
             if session.start(url, user_agent):
                 self._sessions[channel_uuid] = session
 
+                # Track stream allocation for release on stop
+                if allocated_stream is not None and channel is not None:
+                    self._allocated_streams[channel_uuid] = {
+                        "channel": channel,
+                        "stream_id": allocated_stream.id,
+                    }
+
                 # Register shutdown callback
                 def shutdown_cb(uuid=channel_uuid):
                     self.stop_session(uuid)
@@ -382,6 +626,9 @@ class HLSOutputManager:
 
                 # Start client manager if not running
                 hls_client_manager.start()
+
+                # Start cleanup thread if not running
+                self._start_cleanup_thread()
 
                 # Log system event for channel start
                 self._log_channel_event(
@@ -394,23 +641,68 @@ class HLSOutputManager:
                 return session
             else:
                 self._release_ownership(channel_uuid)
+                # Release the allocated stream slot on failure
+                if allocated_stream is not None and channel is not None:
+                    try:
+                        channel.release_stream()
+                    except Exception as e:
+                        logger.debug("Failed to release stream on start failure: %s", e)
                 return None
 
     def stop_session(self, channel_uuid: str):
-        """Stop an HLS session for a channel."""
+        """Stop an HLS session for a channel.
+
+        Handles full cleanup including:
+        - Stopping the session (FFmpeg, storage, metadata)
+        - Releasing stream connection allocation
+        - Triggering final stats push after metadata deletion
+        - Releasing ownership
+        """
+        self._stop_session_internal(channel_uuid, release_ownership=True)
+
+    def _stop_session_internal(self, channel_uuid: str, release_ownership: bool = True):
+        """Internal session stop with configurable ownership release."""
         with self._sessions_lock:
             session = self._sessions.pop(channel_uuid, None)
 
         if session:
-            session.stop()
+            is_proxy = session.is_proxy
+
+            if not is_proxy:
+                # Stop the actual session (FFmpeg, storage, output dir, metadata)
+                session.stop()
+
+                # Task 2.2: Wait a small delay for Redis propagation, then push stats
+                time.sleep(0.05)
+                try:
+                    hls_client_manager._trigger_stats_update()
+                except Exception as e:
+                    logger.debug("Failed to trigger final stats update: %s", e)
+
             hls_client_manager.unregister_shutdown_callback(channel_uuid)
             hls_client_manager.cleanup_channel(channel_uuid)
-            self._release_ownership(channel_uuid)
 
-            # Log system event for channel stop
-            self._log_channel_event("channel_stop", channel_uuid, stream_type="hls")
+            if release_ownership and not is_proxy:
+                self._release_ownership(channel_uuid)
 
-            logger.info("HLS session stopped for %s", channel_uuid)
+            # Task 1.3: Release stream connection allocation
+            alloc_info = self._allocated_streams.pop(channel_uuid, None)
+            if alloc_info and not is_proxy:
+                try:
+                    alloc_info["channel"].release_stream()
+                    logger.debug(
+                        "Released stream connection for channel %s",
+                        channel_uuid,
+                    )
+                except Exception as e:
+                    logger.debug("Failed to release stream connection: %s", e)
+
+            if not is_proxy:
+                # Log system event for channel stop
+                self._log_channel_event("channel_stop", channel_uuid, stream_type="hls")
+                logger.info("HLS session stopped for %s", channel_uuid)
+            else:
+                logger.debug("HLS proxy session removed for %s", channel_uuid)
 
     def get_session(self, channel_uuid: str) -> Optional[HLSSession]:
         """Get an existing session without starting a new one."""
@@ -437,6 +729,8 @@ class HLSOutputManager:
 
     def stop_all_sessions(self):
         """Stop all active sessions. Called on shutdown."""
+        self._stop_cleanup_thread()
+
         with self._sessions_lock:
             channel_uuids = list(self._sessions.keys())
 

@@ -38,8 +38,12 @@ SAMPLE_RATE_RE = re.compile(r"(\d+)\s*Hz")
 AUDIO_CHANNELS_RE = re.compile(r"(mono|stereo|5\.1|7\.1|\d+\s*channels)")
 PIXEL_FORMAT_RE = re.compile(r"(yuv\w+|rgb\w+|nv\d+)")
 
-# Metadata hash TTL in seconds (1 hour, refreshed periodically)
+# Metadata hash TTL in seconds (1 hour, refreshed periodically by cleanup thread)
 METADATA_TTL = 3600
+
+# Redis lock key for watcher dedup (Task 4.2)
+WATCHER_LOCK_PREFIX = "hls_output:watcher:{uuid}"
+WATCHER_LOCK_TTL = 60  # seconds
 
 
 class HLSSession:
@@ -48,6 +52,10 @@ class HLSSession:
     Handles FFmpeg lifecycle, stderr parsing for stream info,
     writes unified metadata to ts_proxy-compatible Redis hash,
     and integrates with the storage backend.
+
+    Sessions can be either *owner* sessions (running FFmpeg locally)
+    or *proxy* sessions (storage-only, for serving segments from
+    another worker's output). The ``is_proxy`` flag distinguishes them.
     """
 
     def __init__(
@@ -59,6 +67,7 @@ class HLSSession:
         stream_profile_name: str = None,
         m3u_profile_id=None,
         worker_id: str = None,
+        is_proxy: bool = False,
     ):
         """Initialize session.
 
@@ -72,6 +81,7 @@ class HLSSession:
             stream_profile_name: Display name of the stream profile.
             m3u_profile_id: Database ID of the M3U account profile.
             worker_id: Identifier for the current worker process.
+            is_proxy: If True, this is a proxy session (storage-only, no FFmpeg).
         """
         self.channel_uuid = channel_uuid
         self.storage = storage
@@ -80,11 +90,13 @@ class HLSSession:
         self._stream_profile_name = stream_profile_name or ""
         self._m3u_profile_id = m3u_profile_id
         self._worker_id = worker_id or ""
+        self._is_proxy = is_proxy
         self._process = None
         self._monitor_thread = None
         self._stderr_thread = None
         self._stop_event = threading.Event()
         self._watcher = None
+        self._watcher_lock_held = False
         self._stream_url = None
         self._user_agent = None
         self._started_at = None
@@ -93,6 +105,11 @@ class HLSSession:
         self._total_bytes = 0
         self._total_bytes_lock = threading.Lock()
         self._db_stats_updated = False
+
+    @property
+    def is_proxy(self) -> bool:
+        """Whether this is a proxy session (no local FFmpeg process)."""
+        return self._is_proxy
 
     @property
     def output_path(self) -> str:
@@ -147,6 +164,10 @@ class HLSSession:
         Returns:
             True if started successfully.
         """
+        if self._is_proxy:
+            logger.debug("Cannot start FFmpeg on a proxy session for %s", self.channel_uuid)
+            return False
+
         if self.is_running:
             logger.warning("Session already running for channel %s", self.channel_uuid)
             return True
@@ -201,13 +222,9 @@ class HLSSession:
             )
             self._monitor_thread.start()
 
-            # Start watcher for Redis mode
+            # Start watcher for Redis mode (Task 4.2: with lock)
             if hls_config.storage_backend == "redis":
-                from .watcher import FileWatcher
-                self._watcher = FileWatcher(
-                    self.channel_uuid, output_path, self.storage
-                )
-                self._watcher.start()
+                self._start_watcher_with_lock(output_path)
 
             # Write initial unified metadata to ts_proxy-compatible hash
             self._write_initial_metadata()
@@ -219,13 +236,20 @@ class HLSSession:
             return False
 
     def stop(self):
-        """Stop the FFmpeg process and clean up."""
+        """Stop the FFmpeg process and clean up.
+
+        Note: The final stats WebSocket push is NOT triggered here. It is
+        handled by HLSOutputManager.stop_session() after a brief delay to
+        ensure Redis propagation of the metadata deletion.
+        """
+        if self._is_proxy:
+            logger.debug("Proxy session stop for %s — no FFmpeg to stop", self.channel_uuid)
+            return
+
         self._stop_event.set()
 
-        # Stop watcher
-        if self._watcher is not None:
-            self._watcher.stop()
-            self._watcher = None
+        # Stop watcher (and release lock)
+        self._stop_watcher()
 
         # Stop FFmpeg process
         if self._process is not None:
@@ -263,13 +287,9 @@ class HLSSession:
         # Update DB stats one last time
         self._update_stream_stats_in_db()
 
-        # Delete unified metadata and client set immediately so the
-        # Stats page stops showing this channel right away.
+        # Task 1.4: Delete unified metadata and client set atomically
+        # so the Stats page stops showing this channel right away.
         self._delete_unified_metadata()
-
-        # Trigger a final channel_stats WebSocket push so the frontend
-        # removes the stats card without waiting for the next poll.
-        self._trigger_final_stats_update()
 
         logger.info("HLS output stopped for channel %s", self.channel_uuid)
 
@@ -290,6 +310,84 @@ class HLSSession:
         self._update_ts_metadata({
             ChannelMetadataField.TOTAL_BYTES: str(self._total_bytes),
         })
+
+    def refresh_metadata_ttl(self):
+        """Refresh the TTL on the metadata hash (called by cleanup thread)."""
+        try:
+            rc = self.redis_client
+            if rc is None:
+                return
+            rc.expire(self._metadata_key, METADATA_TTL)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ #
+    #  Watcher with Redis lock (Task 4.2)
+    # ------------------------------------------------------------------ #
+
+    def _get_watcher_lock_key(self) -> str:
+        return WATCHER_LOCK_PREFIX.format(uuid=self.channel_uuid)
+
+    def _start_watcher_with_lock(self, output_path: str):
+        """Start the FileWatcher only if we can acquire a Redis lock.
+
+        This prevents duplicate watchers across workers for the same channel.
+        """
+        try:
+            rc = self.redis_client
+            lock_key = self._get_watcher_lock_key()
+            if rc is not None:
+                acquired = rc.set(lock_key, self._worker_id, nx=True, ex=WATCHER_LOCK_TTL)
+                if not acquired:
+                    logger.info(
+                        "Watcher lock already held for channel %s — skipping watcher start",
+                        self.channel_uuid,
+                    )
+                    return
+                self._watcher_lock_held = True
+
+                # Start a thread to refresh the lock TTL
+                def refresh_watcher_lock():
+                    while not self._stop_event.is_set():
+                        try:
+                            current = rc.get(lock_key)
+                            if current and current.decode("utf-8") == self._worker_id:
+                                rc.expire(lock_key, WATCHER_LOCK_TTL)
+                        except Exception:
+                            pass
+                        self._stop_event.wait(WATCHER_LOCK_TTL // 2)
+
+                threading.Thread(
+                    target=refresh_watcher_lock,
+                    name=f"hls-watcher-lock-{self.channel_uuid[:8]}",
+                    daemon=True,
+                ).start()
+        except Exception as e:
+            logger.debug("Failed to acquire watcher lock for %s: %s", self.channel_uuid, e)
+
+        from .watcher import FileWatcher
+        self._watcher = FileWatcher(
+            self.channel_uuid, output_path, self.storage
+        )
+        self._watcher.start()
+
+    def _stop_watcher(self):
+        """Stop the watcher and release the Redis lock."""
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None
+
+        if self._watcher_lock_held:
+            try:
+                rc = self.redis_client
+                if rc is not None:
+                    lock_key = self._get_watcher_lock_key()
+                    current = rc.get(lock_key)
+                    if current and current.decode("utf-8") == self._worker_id:
+                        rc.delete(lock_key)
+            except Exception:
+                pass
+            self._watcher_lock_held = False
 
     # ------------------------------------------------------------------ #
     #  Unified TS-compatible Redis metadata (ts_proxy:channel:{UUID}:metadata)
@@ -355,29 +453,36 @@ class HLSSession:
             pass
 
     def _delete_unified_metadata(self):
-        """Delete the unified metadata hash and client set immediately on stop.
+        """Delete the unified metadata hash and client set atomically on stop.
 
-        This ensures the Stats page removes the channel card right away
-        rather than keeping it visible during a grace TTL period.
+        Uses a Redis pipeline for atomic deletion (Task 1.4) so that the
+        stats scan cannot see partial state.
         """
         try:
             rc = self.redis_client
             if rc is None:
                 return
-            # Delete metadata hash
-            rc.delete(self._metadata_key)
-            # Delete client set so the channel won't be discovered by Stats scan
+
             client_set_key = f"ts_proxy:channel:{self.channel_uuid}:clients"
-            rc.delete(client_set_key)
-            # Clean up any individual client data keys
-            cursor = 0
             client_key_pattern = f"ts_proxy:channel:{self.channel_uuid}:clients:*"
+
+            # Collect all individual client keys first
+            client_keys = []
+            cursor = 0
             while True:
                 cursor, keys = rc.scan(cursor, match=client_key_pattern, count=50)
                 if keys:
-                    rc.delete(*keys)
+                    client_keys.extend(keys)
                 if cursor == 0:
                     break
+
+            # Delete everything atomically via pipeline
+            pipe = rc.pipeline(transaction=True)
+            pipe.delete(self._metadata_key)
+            pipe.delete(client_set_key)
+            for key in client_keys:
+                pipe.delete(key)
+            pipe.execute()
         except Exception as e:
             logger.debug("Failed to delete unified metadata for %s: %s", self.channel_uuid, e)
 
@@ -396,14 +501,6 @@ class HLSSession:
                 logger.info("Cleaned up HLS output directory: %s", output_path)
         except Exception as e:
             logger.warning("Failed to clean up HLS output directory: %s", e)
-
-    def _trigger_final_stats_update(self):
-        """Push a final channel_stats WebSocket update so the frontend drops the card."""
-        try:
-            from .client_manager import hls_client_manager
-            hls_client_manager._trigger_stats_update()
-        except Exception as e:
-            logger.debug("Failed to trigger final stats update: %s", e)
 
     # ------------------------------------------------------------------ #
     #  Legacy per-key metadata (kept for backward compat with HLS status)

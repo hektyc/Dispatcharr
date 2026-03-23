@@ -8,7 +8,7 @@ import os
 import re
 import time
 import glob
-import hashlib
+import uuid
 import logging
 
 from django.http import HttpResponse, JsonResponse, FileResponse, StreamingHttpResponse
@@ -28,11 +28,22 @@ MIN_SEGMENTS_REQUIRED = 2
 
 
 def _get_client_id(request) -> str:
-    """Generate a unique client ID from IP and user agent."""
-    ip = _get_client_ip(request)
-    ua = request.META.get("HTTP_USER_AGENT", "unknown")
-    raw = f"{ip}:{ua}"
-    return hashlib.md5(raw.encode()).hexdigest()[:12]
+    """Get a unique per-session client ID.
+
+    HLS protocol requires that playlist polls and segment fetches from the
+    same playback session be recognized as one client.  We achieve this by:
+
+    1. Checking for a ``cid`` query parameter (set in rewritten playlist URLs).
+    2. If absent, generating a new unique ID for this session.
+
+    This fixes the old MD5(IP+UA) approach which gave every tab from the same
+    browser the same client_id, making multi-tab client counting impossible.
+    """
+    cid = request.GET.get("cid")
+    if cid:
+        return cid
+    # Generate a new unique session-scoped client ID
+    return f"hls_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 
 
 def _get_client_ip(request) -> str:
@@ -55,6 +66,10 @@ def hls_master_playlist(request, channel_uuid):
     This is the entry point for HLS clients. It starts the session
     if not already running, waits for readiness, then returns a
     master playlist pointing to the media playlist.
+
+    A unique ``cid`` query parameter is embedded in the media playlist
+    URL so that subsequent playlist/segment requests from this playback
+    session are recognized as the same client (Task 1.2).
     """
     if not hls_config.is_enabled:
         return HttpResponse(
@@ -67,8 +82,10 @@ def hls_master_playlist(request, channel_uuid):
     if not session:
         return HttpResponse("Failed to start HLS session", status=503)
 
-    # Register client with IP and user-agent for stats tracking
+    # Generate a unique client ID for this playback session
     client_id = _get_client_id(request)
+
+    # Register client with IP and user-agent for stats tracking
     client_ip = _get_client_ip(request)
     client_ua = _get_user_agent(request)
     hls_client_manager.add_client(
@@ -105,13 +122,13 @@ def hls_master_playlist(request, channel_uuid):
     if not ready:
         return HttpResponse("HLS stream not ready yet, try again", status=503)
 
-    # Build master playlist
+    # Build master playlist with cid query parameter for client tracking
     base_url = f"/proxy/hls_output/{channel_uuid}"
     content = (
         "#EXTM3U\n"
         "#EXT-X-VERSION:3\n"
         f"#EXT-X-STREAM-INF:BANDWIDTH=5000000\n"
-        f"{base_url}/index.m3u8\n"
+        f"{base_url}/index.m3u8?cid={client_id}\n"
     )
 
     return HttpResponse(
@@ -129,7 +146,8 @@ def hls_media_playlist(request, channel_uuid):
     """Serve the HLS media playlist (index.m3u8) for a channel.
 
     Reads the playlist from the storage backend and rewrites
-    segment URLs to route through this view layer.
+    segment URLs to route through this view layer, preserving
+    the ``cid`` query parameter for client identity.
     """
     session = hls_manager.get_session(channel_uuid)
     if not session:
@@ -159,8 +177,9 @@ def hls_media_playlist(request, channel_uuid):
     if not content:
         return HttpResponse("Playlist not available", status=404)
 
-    # Rewrite segment URLs to route through our endpoint
+    # Rewrite segment URLs to route through our endpoint, preserving cid
     base_url = f"/proxy/hls_output/{channel_uuid}"
+    cid_param = f"?cid={client_id}" if client_id else ""
     rewritten_lines = []
     for line in content.split("\n"):
         line = line.strip()
@@ -169,7 +188,7 @@ def hls_media_playlist(request, channel_uuid):
         else:
             # This is a segment filename - prepend our base URL
             segment_name = os.path.basename(line)
-            rewritten_lines.append(f"{base_url}/{segment_name}")
+            rewritten_lines.append(f"{base_url}/{segment_name}{cid_param}")
     rewritten_content = "\n".join(rewritten_lines) + "\n"
 
     return HttpResponse(

@@ -448,32 +448,52 @@ class HLSClientManager:
             logger.error("Cleanup error: %s", e)
 
     def _handle_empty_channel(self, channel_uuid: str):
-        """Handle a channel with no active clients — start cooldown or trigger shutdown."""
+        """Handle a channel with no active clients — start cooldown or trigger shutdown.
+
+        Task 3.1: Uses a precise cooldown approach — the cooldown key stores
+        the start timestamp as its value. The cleanup thread compares current
+        time against stored_start + configured_delay to decide when to shut
+        down, instead of relying solely on Redis TTL expiry.
+        """
         rc = self.redis_client
         if rc is None:
             return
 
         cooldown_key = HLS_COOLDOWN_KEY.format(uuid=channel_uuid)
 
-        if not rc.exists(cooldown_key):
-            # Start cooldown
+        cooldown_value = rc.get(cooldown_key)
+        if cooldown_value is None:
+            # Start cooldown — store the current timestamp
             from .config import hls_config
             delay = hls_config.shutdown_delay
-            rc.setex(cooldown_key, delay, "1")
+            # Store start time as the value; use a generous TTL (delay + buffer)
+            rc.setex(cooldown_key, delay + CLEANUP_INTERVAL + 5, str(time.time()))
             logger.info(
                 "Channel %s has no clients, starting %ds shutdown cooldown",
                 channel_uuid[:8], delay,
             )
         else:
-            # Check if cooldown has expired
-            ttl = rc.ttl(cooldown_key)
-            if ttl <= 0:
-                # Cooldown expired — trigger shutdown
+            # Task 3.1: Check if cooldown has elapsed based on stored start time
+            try:
+                cooldown_start = float(
+                    cooldown_value.decode("utf-8")
+                    if isinstance(cooldown_value, bytes)
+                    else cooldown_value
+                )
+            except (ValueError, TypeError):
+                cooldown_start = 0.0
+
+            from .config import hls_config
+            delay = hls_config.shutdown_delay
+            elapsed = time.time() - cooldown_start
+
+            if elapsed >= delay:
+                # Cooldown elapsed — trigger shutdown
                 callback = self._shutdown_callbacks.get(channel_uuid)
                 if callback:
                     logger.info(
-                        "Channel %s shutdown cooldown expired, stopping session",
-                        channel_uuid[:8],
+                        "Channel %s shutdown cooldown elapsed (%.1fs >= %ds), stopping session",
+                        channel_uuid[:8], elapsed, delay,
                     )
                     try:
                         callback()
@@ -515,6 +535,11 @@ class HLSClientManager:
                     parts = key.split(":")
                     if len(parts) >= 4:
                         ch_id = parts[2]
+                        # Skip channels whose metadata has already been deleted
+                        # (race-condition guard for final stats push)
+                        metadata_key = f"ts_proxy:channel:{ch_id}:metadata"
+                        if not redis_client.exists(metadata_key):
+                            continue
                         channel_info = ChannelStatus.get_basic_channel_info(ch_id)
                         if channel_info:
                             all_channels.append(channel_info)
