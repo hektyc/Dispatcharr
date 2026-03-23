@@ -382,41 +382,20 @@ class HLSSession:
             logger.debug("Failed to delete unified metadata for %s: %s", self.channel_uuid, e)
 
     def _cleanup_output_directory(self):
-        """Remove HLS segment files and playlist from the output directory.
+        """Delete the HLS output directory and all its contents.
 
-        Only deletes files inside the directory, **not** the directory itself,
-        to avoid PermissionError when another worker tries to recreate it.
+        Uses shutil.rmtree to remove the entire channel directory.
+        The init script (03-init-dispatcharr.sh) ensures the parent
+        HLS_PATH is owned by PUID:PGID, so recreation is safe.
         """
         try:
-            import glob as glob_mod
+            import shutil
             output_path = self.output_path
-            if not output_path or not os.path.isdir(output_path):
-                return
-            patterns = [
-                os.path.join(output_path, "index*.ts"),
-                os.path.join(output_path, "index*.m4s"),
-                os.path.join(output_path, "index.m3u8"),
-                os.path.join(output_path, "init.mp4"),
-            ]
-            removed = 0
-            for pattern in patterns:
-                for f in glob_mod.glob(pattern):
-                    try:
-                        os.remove(f)
-                        removed += 1
-                    except OSError:
-                        pass
-            if removed:
-                logger.debug(
-                    "Cleaned up %d HLS files from %s", removed, output_path
-                )
-            # Try to remove the now-empty directory (non-critical)
-            try:
-                os.rmdir(output_path)
-            except OSError:
-                pass  # Directory not empty or permission issue — that's fine
+            if output_path and os.path.isdir(output_path):
+                shutil.rmtree(output_path, ignore_errors=True)
+                logger.info("Cleaned up HLS output directory: %s", output_path)
         except Exception as e:
-            logger.debug("Failed to clean up HLS output directory: %s", e)
+            logger.warning("Failed to clean up HLS output directory: %s", e)
 
     def _trigger_final_stats_update(self):
         """Push a final channel_stats WebSocket update so the frontend drops the card."""

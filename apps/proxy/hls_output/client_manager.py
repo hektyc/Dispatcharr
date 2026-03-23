@@ -3,8 +3,9 @@
 Redis-backed client tracking for HLS output sessions.
 Tracks connected clients using TS-compatible Redis keys so that
 HLS channels appear on the Stats page alongside TS channels.
-Handles TTL-based cleanup, heartbeat thread, and manages
-session shutdown after the last client disconnects.
+Handles TTL-based cleanup, heartbeat thread with stale-client
+detection, and manages session shutdown after the last client
+disconnects.
 """
 
 import time
@@ -29,9 +30,11 @@ HLS_ACTIVE_CHANNELS_KEY = "hls_output:active_channels"
 
 # Timeouts
 CLIENT_TTL = 60  # Seconds before a client record expires in Redis
-HEARTBEAT_INTERVAL = 10  # Seconds between heartbeat refreshes
-CLEANUP_INTERVAL = 10  # Seconds between cleanup runs
-COOLDOWN_DURATION = 5  # Seconds to wait before allowing shutdown after last client
+HEARTBEAT_INTERVAL = 10  # Seconds between heartbeat cycles
+CLEANUP_INTERVAL = 10  # Seconds between cleanup cycles
+# If a client hasn't requested any segment/playlist for this many seconds
+# it is considered disconnected. HLS clients typically request every 2-6s.
+STALE_CLIENT_TIMEOUT = 30
 
 
 class HLSClientManager:
@@ -40,6 +43,9 @@ class HLSClientManager:
     Uses Redis to track connected clients across multiple workers.
     Writes TS-compatible client metadata so the existing Stats API
     and WebSocket channel_stats push automatically include HLS clients.
+
+    The heartbeat thread checks ``last_active`` timestamps and removes
+    stale clients that have stopped requesting content.
     """
 
     _instance = None
@@ -135,17 +141,7 @@ class HLSClientManager:
         ip_address: str = "unknown",
         user_agent: str = "unknown",
     ) -> bool:
-        """Register a client for a channel using TS-compatible Redis keys.
-
-        Args:
-            channel_uuid: The channel identifier.
-            client_id: Unique client identifier.
-            ip_address: Client IP address.
-            user_agent: Client user-agent string.
-
-        Returns:
-            True if client was added successfully.
-        """
+        """Register a client for a channel using TS-compatible Redis keys."""
         try:
             rc = self.redis_client
             if rc is None:
@@ -225,9 +221,7 @@ class HLSClientManager:
                 ChannelMetadataField.LAST_ACTIVE: now,
             }
             if bytes_sent > 0:
-                # Increment bytes_sent
                 rc.hincrby(client_data_key, ChannelMetadataField.BYTES_SENT, bytes_sent)
-                # Remove from updates dict since we used hincrby
             rc.hset(client_data_key, mapping=updates)
             rc.expire(client_data_key, CLIENT_TTL)
 
@@ -269,6 +263,11 @@ class HLSClientManager:
             self._log_client_event(
                 "client_disconnect", channel_uuid,
                 client_id=client_id, stream_type="hls",
+            )
+
+            logger.info(
+                "HLS client %s removed from channel %s",
+                client_id, channel_uuid[:8],
             )
         except Exception as e:
             logger.error("Failed to remove client %s from channel %s: %s", client_id, channel_uuid, e)
@@ -323,33 +322,38 @@ class HLSClientManager:
         try:
             rc = self.redis_client
             if rc is not None:
-                # Remove from HLS active channels set
                 rc.srem(HLS_ACTIVE_CHANNELS_KEY, channel_uuid)
-                # Clear cooldown
                 cooldown_key = HLS_COOLDOWN_KEY.format(uuid=channel_uuid)
                 rc.delete(cooldown_key)
         except Exception as e:
             logger.debug("Failed to clean up channel %s from client manager: %s", channel_uuid, e)
 
-        # Remove from local tracking
         with self._local_clients_lock:
             self._local_clients.pop(channel_uuid, None)
 
     # ------------------------------------------------------------------ #
-    #  Heartbeat thread
+    #  Heartbeat thread — detects stale clients by checking last_active
     # ------------------------------------------------------------------ #
 
     def _heartbeat_loop(self):
-        """Periodically refresh TTLs on client keys for locally-tracked clients."""
+        """Periodically check for stale clients and refresh TTLs for active ones."""
         while not self._stop_event.is_set():
             try:
-                self._refresh_client_ttls()
+                self._check_and_refresh_clients()
             except Exception as e:
                 logger.error("HLS heartbeat error: %s", e)
             self._stop_event.wait(HEARTBEAT_INTERVAL)
 
-    def _refresh_client_ttls(self):
-        """Refresh TTL on all locally-tracked client hashes and sets."""
+    def _check_and_refresh_clients(self):
+        """Check last_active for each locally-tracked client.
+
+        If a client hasn't been active within STALE_CLIENT_TIMEOUT,
+        it is removed (disconnect detected). Active clients have their
+        TTL refreshed so their keys don't expire in Redis.
+
+        This mirrors the TS proxy's heartbeat thread which also checks
+        last_active and removes ghost clients.
+        """
         rc = self.redis_client
         if rc is None:
             return
@@ -362,28 +366,57 @@ class HLSClientManager:
         if not channels_snapshot:
             return
 
-        pipe = rc.pipeline()
+        current_time = time.time()
+        stale_removals = []  # list of (channel_uuid, client_id) to remove
+
         for channel_uuid, client_ids in channels_snapshot.items():
-            client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
             for client_id in client_ids:
                 client_data_key = TS_CLIENT_DATA_KEY.format(
                     uuid=channel_uuid, client_id=client_id
                 )
-                # Only refresh TTL, don't update last_active
-                pipe.expire(client_data_key, CLIENT_TTL)
-                pipe.sadd(client_set_key, client_id)
-            pipe.expire(client_set_key, CLIENT_TTL * 2)
-        try:
-            pipe.execute()
-        except Exception as e:
-            logger.debug("Heartbeat pipeline error: %s", e)
+
+                # Check if key still exists
+                if not rc.exists(client_data_key):
+                    stale_removals.append((channel_uuid, client_id))
+                    continue
+
+                # Check last_active timestamp
+                last_active_raw = rc.hget(client_data_key, ChannelMetadataField.LAST_ACTIVE)
+                if last_active_raw:
+                    try:
+                        last_active = float(
+                            last_active_raw.decode("utf-8")
+                            if isinstance(last_active_raw, bytes)
+                            else last_active_raw
+                        )
+                        idle_time = current_time - last_active
+                        if idle_time > STALE_CLIENT_TIMEOUT:
+                            logger.info(
+                                "HLS client %s on channel %s idle for %.0fs — removing as stale",
+                                client_id, channel_uuid[:8], idle_time,
+                            )
+                            stale_removals.append((channel_uuid, client_id))
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+
+                # Client is active — refresh its TTL (but do NOT update last_active)
+                rc.expire(client_data_key, CLIENT_TTL)
+
+            # Refresh the client set TTL for channels that still have clients
+            client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
+            rc.expire(client_set_key, CLIENT_TTL * 2)
+
+        # Remove stale clients (outside the snapshot iteration)
+        for channel_uuid, client_id in stale_removals:
+            self.remove_client(channel_uuid, client_id)
 
     # ------------------------------------------------------------------ #
-    #  Cleanup thread
+    #  Cleanup thread — handles empty channels and triggers shutdown
     # ------------------------------------------------------------------ #
 
     def _cleanup_loop(self):
-        """Periodically clean up inactive clients."""
+        """Periodically check for channels with no clients."""
         while not self._stop_event.is_set():
             try:
                 self._cleanup_inactive_clients()
@@ -392,7 +425,7 @@ class HLSClientManager:
             self._stop_event.wait(CLEANUP_INTERVAL)
 
     def _cleanup_inactive_clients(self):
-        """Remove clients whose data keys have expired (ghost clients)."""
+        """Scan HLS active channels for empty client sets and trigger shutdown."""
         rc = self.redis_client
         if rc is None:
             return
@@ -405,49 +438,17 @@ class HLSClientManager:
             for ch in channels:
                 channel_uuid = ch.decode("utf-8") if isinstance(ch, bytes) else ch
                 client_set_key = TS_CLIENT_SET_KEY.format(uuid=channel_uuid)
-                clients = rc.smembers(client_set_key)
 
-                if not clients:
-                    # No clients - check cooldown for shutdown
+                # Check if client set exists and has members
+                client_count = rc.scard(client_set_key) or 0
+                if client_count == 0:
                     self._handle_empty_channel(channel_uuid)
-                    continue
-
-                # Check each client's data key existence (TTL-based expiry)
-                stale_ids = []
-                for client_id_raw in clients:
-                    client_id = (
-                        client_id_raw.decode("utf-8")
-                        if isinstance(client_id_raw, bytes)
-                        else client_id_raw
-                    )
-                    client_data_key = TS_CLIENT_DATA_KEY.format(
-                        uuid=channel_uuid, client_id=client_id
-                    )
-                    if not rc.exists(client_data_key):
-                        stale_ids.append(client_id_raw)
-
-                # Remove stale entries from set
-                if stale_ids:
-                    rc.srem(client_set_key, *stale_ids)
-                    # Also remove from local tracking
-                    with self._local_clients_lock:
-                        local_set = self._local_clients.get(channel_uuid)
-                        if local_set:
-                            for sid in stale_ids:
-                                s = sid.decode("utf-8") if isinstance(sid, bytes) else sid
-                                local_set.discard(s)
-
-                # Re-check if channel has clients after cleanup
-                remaining = rc.scard(client_set_key) or 0
-                if remaining == 0:
-                    self._handle_empty_channel(channel_uuid)
-                    self._trigger_stats_update()
 
         except Exception as e:
             logger.error("Cleanup error: %s", e)
 
     def _handle_empty_channel(self, channel_uuid: str):
-        """Handle a channel with no active clients - start cooldown or trigger shutdown."""
+        """Handle a channel with no active clients — start cooldown or trigger shutdown."""
         rc = self.redis_client
         if rc is None:
             return
@@ -457,21 +458,23 @@ class HLSClientManager:
         if not rc.exists(cooldown_key):
             # Start cooldown
             from .config import hls_config
-
             delay = hls_config.shutdown_delay
             rc.setex(cooldown_key, delay, "1")
             logger.info(
                 "Channel %s has no clients, starting %ds shutdown cooldown",
-                channel_uuid, delay,
+                channel_uuid[:8], delay,
             )
         else:
-            # Cooldown expired (key still exists means within TTL) - check if expired
+            # Check if cooldown has expired
             ttl = rc.ttl(cooldown_key)
             if ttl <= 0:
-                # Cooldown expired - trigger shutdown
+                # Cooldown expired — trigger shutdown
                 callback = self._shutdown_callbacks.get(channel_uuid)
                 if callback:
-                    logger.info("Channel %s shutdown cooldown expired, stopping session", channel_uuid)
+                    logger.info(
+                        "Channel %s shutdown cooldown expired, stopping session",
+                        channel_uuid[:8],
+                    )
                     try:
                         callback()
                     except Exception as e:
