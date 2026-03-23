@@ -148,6 +148,7 @@ if [ -n "${HLS_PATH}" ]; then
     echo "Creating HLS output directory: ${HLS_PATH}"
     mkdir -p "${HLS_PATH}"
     chmod 755 "${HLS_PATH}"
+    # Ownership is set after user setup in 03-init-dispatcharr.sh
 fi
 
 # Run init scripts

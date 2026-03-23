@@ -17,6 +17,11 @@ DATA_DIRS=(
     "/data/scripts"
 )
 
+# Conditionally add HLS output directory if configured
+if [ -n "${HLS_PATH}" ]; then
+    DATA_DIRS+=("${HLS_PATH}")
+fi
+
 # APP_DIRS live on the image layer and are always locally writable.
 APP_DIRS=(
     "/app/logo_cache"
