@@ -530,42 +530,38 @@ class HLSOutputManager:
             channel, stream = get_channel_or_stream(channel_uuid)
             stream_profile = None
             stream_info = None
-            allocated_stream = None
+            connection_allocated = False
             if channel:
                 # Task 1.3: Use channel.get_stream() for connection allocation
+                # get_stream() returns (stream_id: int, profile_id: int, error_reason)
                 try:
-                    allocated_stream, alloc_profile, alloc_error = channel.get_stream()
-                    if alloc_error or not allocated_stream:
+                    from apps.channels.models import Stream as StreamModel
+                    alloc_stream_id, alloc_profile_id, alloc_error = channel.get_stream()
+                    if alloc_error or not alloc_stream_id:
                         logger.error(
                             "Stream allocation failed for channel %s: %s",
                             channel_uuid, alloc_error,
                         )
                         self._release_ownership(channel_uuid)
                         return None
-                    url = allocated_stream.url
+                    # Look up the actual Stream object
+                    stream_obj = StreamModel.objects.get(id=alloc_stream_id)
+                    url = stream_obj.url
                     if not url:
                         logger.error("Allocated stream has no URL for %s", channel_uuid)
+                        channel.release_stream()
                         self._release_ownership(channel_uuid)
                         return None
+                    connection_allocated = True
                     # Get profile and user_agent from channel
                     stream_profile = channel.get_stream_profile()
                     user_agent = "VLC/3.0.20 LibVLC/3.0.20"
                     if stream_profile and stream_profile.user_agent:
                         user_agent = stream_profile.user_agent.user_agent
                     stream_info = {
-                        "stream_id": allocated_stream.id,
-                        "m3u_profile_id": None,
+                        "stream_id": alloc_stream_id,
+                        "m3u_profile_id": alloc_profile_id,
                     }
-                    if hasattr(allocated_stream, "m3u_account") and allocated_stream.m3u_account:
-                        try:
-                            from apps.m3u.models import M3UAccountProfile
-                            m3u_profile = M3UAccountProfile.objects.filter(
-                                m3u_account=allocated_stream.m3u_account
-                            ).first()
-                            if m3u_profile:
-                                stream_info["m3u_profile_id"] = m3u_profile.id
-                        except Exception:
-                            pass
                 except Exception as e:
                     logger.error(
                         "Error allocating stream for channel %s: %s",
@@ -612,10 +608,9 @@ class HLSOutputManager:
                 self._sessions[channel_uuid] = session
 
                 # Track stream allocation for release on stop
-                if allocated_stream is not None and channel is not None:
+                if connection_allocated and channel is not None:
                     self._allocated_streams[channel_uuid] = {
                         "channel": channel,
-                        "stream_id": allocated_stream.id,
                     }
 
                 # Register shutdown callback
@@ -642,7 +637,7 @@ class HLSOutputManager:
             else:
                 self._release_ownership(channel_uuid)
                 # Release the allocated stream slot on failure
-                if allocated_stream is not None and channel is not None:
+                if connection_allocated and channel is not None:
                     try:
                         channel.release_stream()
                     except Exception as e:
